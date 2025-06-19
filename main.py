@@ -28,11 +28,9 @@ def load_zones():
     r = requests.get(ZONES_CSV_URL, timeout=10)
     r.raise_for_status()
     data = r.content
-    # сначала CSV
     try:
         df = pd.read_csv(StringIO(data.decode("utf-8-sig")), dtype=str)
     except Exception:
-        # упал — пробуем Excel
         df = pd.read_excel(BytesIO(data), dtype=str)
     required = {"Филиал", "РЭС", "ID", "ФИО"}
     if not required.issubset(df.columns):
@@ -57,6 +55,11 @@ def start_menu(zone):
         return "Выберите филиал:", keyboard_rows(keys)
     else:
         return "Главное меню:", keyboard_rows(["Поиск ТП", "СПРАВКА"])
+
+def tp_input_menu(branch_name):
+    text = f"Введите номер ТП для филиала «{branch_name}» (например: К1):"
+    kb = keyboard_rows(["Назад"])
+    return text, kb
 
 HELP_MENU = keyboard_rows([
     "Сечение кабеля",
@@ -94,8 +97,8 @@ def handle_message(update: Update, context: CallbackContext):
     if zone["filial"] == "All" and not st.get("step"):
         if txt in BRANCH_SHEETS_MAP:
             user_states[uid] = {"step": "branch_selected", "branch": txt}
-            kb = keyboard_rows(["Назад"])
-            return update.message.reply_text(f"Введите номер ТП для филиала «{txt}»: ", reply_markup=kb)
+            text, kb = tp_input_menu(txt)
+            return update.message.reply_text(text, reply_markup=kb)
         else:
             keys = list(BRANCH_SHEETS_MAP.keys()) + ["Назад"]
             return update.message.reply_text("Пожалуйста, выберите филиал из списка.", reply_markup=keyboard_rows(keys))
@@ -104,7 +107,8 @@ def handle_message(update: Update, context: CallbackContext):
     if zone["filial"] != "All" and not st.get("step"):
         if txt == "Поиск ТП":
             user_states[uid] = {"step": "tp_prompt", "branch": zone["filial"]}
-            return update.message.reply_text(f"Введите номер ТП для филиала «{zone['filial']}": ", reply_markup=keyboard_rows(["Назад"]))
+            text, kb = tp_input_menu(zone["filial"])
+            return update.message.reply_text(text, reply_markup=kb)
         if txt == "СПРАВКА":
             return update.message.reply_text("Справочная информация...", reply_markup=HELP_MENU)
 
@@ -121,7 +125,8 @@ def handle_message(update: Update, context: CallbackContext):
             df = df[df["РЭС"].str.strip() == zone["res"]]
         row = df[df["Наименование ТП"].str.strip().eq(tp_id)]
         if row.empty:
-            return update.message.reply_text("ТП не найдено. Попробуйте ещё.", reply_markup=keyboard_rows(["Назад"]))
+            text, kb = tp_input_menu(branch)
+            return update.message.reply_text("ТП не найдено. Попробуйте ещё.", reply_markup=kb)
         r = row.iloc[0]
         out = (
             f"ТП: {r['Наименование ТП']}\n"
@@ -158,7 +163,7 @@ if __name__ == "__main__":
     def ping():
         try: requests.get(SELF_URL, timeout=5)
         except: pass
-        t = threading.Timer(9*60, ping); t.daemon = True; t.start()
+        t = threading.Timer(9*60, ping); t.daemon=True; t.start()
     ping()
     bot.set_webhook(f"{SELF_URL}/webhook")
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
