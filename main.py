@@ -70,7 +70,7 @@ def main_menu_keyboard():
 
 def start(update: Update, context: CallbackContext):
     update.message.reply_text(
-        f"Здравствуйте, {load_zones().get(str(update.message.from_user.id),{{}}).get('name','пользователь')}!",
+        f"Здравствуйте, {load_zones().get(str(update.message.from_user.id), {}).get('name','пользователь')}!",
         reply_markup=main_menu_keyboard()
     )
 
@@ -155,4 +155,4 @@ def index():
 if __name__ == '__main__':
     # Устанавливаем вебхук и запускаем Flask
     bot.set_webhook(f"{SELF_URL}/webhook")
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', '5000')))
