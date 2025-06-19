@@ -127,8 +127,7 @@ def handle_message(update: Update, context: CallbackContext):
 
         vols_input = text.strip()
         # TODO: добавить логику поиска ВОЛС и выдачи PDF
-        update.message.reply_text(f"Вы ввели ВОЛС: {vols_input}
-Здесь будет логика выдачи PDF.", reply_markup=main_menu(region))
+        update.message.reply_text(f"Вы ввели ВОЛС: {vols_input}\nЗдесь будет логика выдачи PDF.", reply_markup=main_menu(region))
         user_states[user_id] = {}
         return
 
