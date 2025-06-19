@@ -1,18 +1,20 @@
 import os
+import re
 import threading
+from io import StringIO, BytesIO
+
 import pandas as pd
 import requests
-from io import StringIO, BytesIO
 from flask import Flask, request
-from telegram import Bot, Update, ReplyKeyboardMarkup
+from telegram import Bot, Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import Dispatcher, CommandHandler, MessageHandler, Filters, CallbackContext
 
 app = Flask(__name__)
 
 # === ENV ===
-TOKEN            = os.getenv("TOKEN")
-SELF_URL         = os.getenv("SELF_URL")
-ZONES_CSV_URL    = os.getenv("ZONES_CSV_URL")
+TOKEN             = os.getenv("TOKEN")
+SELF_URL          = os.getenv("SELF_URL")
+ZONES_CSV_URL     = os.getenv("ZONES_CSV_URL")
 BRANCH_SHEETS_MAP = {
     k.strip(): v.strip()
     for k, v in (p.split("=", 1) for p in os.getenv("BRANCH_SHEETS_MAP", "").split(",") if "=" in p)
@@ -22,10 +24,25 @@ bot        = Bot(token=TOKEN)
 dispatcher = Dispatcher(bot, None, use_context=True)
 user_states = {}   # user_id -> state
 
-# Загрузка зон доступа
+# --- Утилиты ---
+
+def normalize_sheet_url(url, default_gid=0):
+    """
+    Преобразует общий URL Google Sheets в прямую ссылку экспорта CSV.
+    """
+    if '/export' in url:
+        return url
+    m = re.search(r'/d/([a-zA-Z0-9_-]+)', url)
+    if not m:
+        return url
+    sheet_id = m.group(1)
+    return f'https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={default_gid}'
+
+
 def load_zones():
-    """Загружает таблицу зон: сначала пробует CSV, если не сработает — Excel."""
-    r = requests.get(ZONES_CSV_URL, timeout=10)
+    """Загружает таблицу зон доступа и возвращает словарь по ID пользователя."""
+    url = normalize_sheet_url(ZONES_CSV_URL)
+    r = requests.get(url, timeout=10)
     r.raise_for_status()
     data = r.content
     try:
@@ -45,125 +62,101 @@ def load_zones():
         }
     return zones
 
-# Клавиатуры
-def keyboard_rows(labels):
-    return ReplyKeyboardMarkup([[l] for l in labels], resize_keyboard=True)
+# --- Меню клавиатур ---
+def main_menu_keyboard():
+    return ReplyKeyboardMarkup([["Поиск"], ["Справочная информация"], ["Уведомление всем"]], resize_keyboard=True)
 
-def start_menu(zone):
-    if zone["filial"] == "All":
-        keys = list(BRANCH_SHEETS_MAP.keys()) + ["Назад"]
-        return "Выберите филиал:", keyboard_rows(keys)
-    else:
-        return "Главное меню:", keyboard_rows(["Поиск ТП", "СПРАВКА"])
+# --- Хендлеры ---
 
-def tp_input_menu(branch_name):
-    text = f"Введите номер ТП для филиала «{branch_name}» (например: К1):"
-    kb = keyboard_rows(["Назад"])
-    return text, kb
-
-HELP_MENU = keyboard_rows([
-    "Сечение кабеля",
-    "Справка формулы",
-    "Назад"
-])
-
-# Handler /start
 def start(update: Update, context: CallbackContext):
-    uid = str(update.effective_user.id)
+    update.message.reply_text(
+        f"Здравствуйте, {load_zones().get(str(update.message.from_user.id),{}).get('name','пользователь')}!",
+        reply_markup=main_menu_keyboard()
+    )
+
+
+def handle_text(update: Update, context: CallbackContext):
+    text = update.message.text
+    user_id = str(update.message.from_user.id)
     zones = load_zones()
-    if uid not in zones:
-        return update.message.reply_text("У вас нет прав доступа.")
-    user_states[uid] = {}
-    text, kb = start_menu(zones[uid])
-    update.message.reply_text(text, reply_markup=kb)
-
-# Основной хендлер
-def handle_message(update: Update, context: CallbackContext):
-    uid = str(update.effective_user.id)
-    txt = update.message.text.strip()
-    zones = load_zones()
-    if uid not in zones:
-        return update.message.reply_text("У вас нет прав доступа.")
-    zone = zones[uid]
-    st = user_states.get(uid, {})
-
-    # Назад
-    if txt == "Назад":
-        user_states[uid] = {}
-        text, kb = start_menu(zone)
-        return update.message.reply_text(text, reply_markup=kb)
-
-    # All-пользователь выбирает филиал
-    if zone["filial"] == "All" and not st.get("step"):
-        if txt in BRANCH_SHEETS_MAP:
-            user_states[uid] = {"step": "branch_selected", "branch": txt}
-            text, kb = tp_input_menu(txt)
-            return update.message.reply_text(text, reply_markup=kb)
-        else:
-            keys = list(BRANCH_SHEETS_MAP.keys()) + ["Назад"]
-            return update.message.reply_text("Пожалуйста, выберите филиал из списка.", reply_markup=keyboard_rows(keys))
-
-    # Конкретный филиал или уже выбрали филиал: поиск ТП или справка
-    if zone["filial"] != "All" and not st.get("step"):
-        if txt == "Поиск ТП":
-            user_states[uid] = {"step": "tp_prompt", "branch": zone["filial"]}
-            text, kb = tp_input_menu(zone["filial"])
-            return update.message.reply_text(text, reply_markup=kb)
-        if txt == "СПРАВКА":
-            return update.message.reply_text("Справочная информация...", reply_markup=HELP_MENU)
-
-    # Обработка ввода ТП
-    if st.get("step") in ("branch_selected", "tp_prompt"):
-        branch = st["branch"]
-        tp_id = txt
-        url = BRANCH_SHEETS_MAP.get(branch)
-        try:
-            df = pd.read_excel(url, dtype=str)
-        except Exception as e:
-            return update.message.reply_text(f"Ошибка загрузки данных: {e}")
-        if zone["res"] != "All":
-            df = df[df["РЭС"].str.strip() == zone["res"]]
-        row = df[df["Наименование ТП"].str.strip().eq(tp_id)]
-        if row.empty:
-            text, kb = tp_input_menu(branch)
-            return update.message.reply_text("ТП не найдено. Попробуйте ещё.", reply_markup=kb)
-        r = row.iloc[0]
-        out = (
-            f"ТП: {r['Наименование ТП']}\n"
-            f"Ур. напр.: {r['Уровень напряжения']}\n"
-            f"ВЛ: {r['Наименование ВЛ']}\n"
-            f"ВУ: {r.get('ВУ (если необходимо)','')}\n"
-            f"Опоры: {r['Опоры']}\n"
-            f"Кол-во опор: {r['Количество опор']}\n"
-            f"Провайдер: {r['Наименование Провайдера']}"
+    state = user_states.get(user_id)
+    if text == "Поиск":
+        update.message.reply_text("Введите номер счётчика:", reply_markup=ReplyKeyboardRemove())
+        user_states[user_id] = "AWAIT_NUMBER"
+    elif state == "AWAIT_NUMBER":
+        # Здесь логика поиска по BRANCH_SHEETS_MAP и отправка результата
+        update.message.reply_text(
+            f"Запрос принят для номерa {text}. Выберите тип информации.",
+            reply_markup=ReplyKeyboardMarkup(
+                [["Договор"], ["Адрес подключения"], ["Прибор учёта"], ["Назад"]],
+                resize_keyboard=True
+            )
         )
-        user_states[uid] = {}
-        text, kb = start_menu(zone)
-        update.message.reply_text(out)
-        return update.message.reply_text(text, reply_markup=kb)
+        user_states[user_id] = ("AWAIT_INFO", text)
+    elif isinstance(state, tuple) and state[0] == "AWAIT_INFO":
+        _, number = state
+        info_type = text
+        # Тут логика чтения нужной Google таблицы и выбор полей по info_type
+        update.message.reply_text(f"Информация ({info_type}) по {number}: ...")
+        update.message.reply_text("Возвращаемся в главное меню.", reply_markup=main_menu_keyboard())
+        user_states.pop(user_id, None)
+    elif text == "Справочная информация":
+        update.message.reply_text(
+            "Выберите раздел:",
+            reply_markup=ReplyKeyboardMarkup(
+                [["Сечение кабеля (ток, мощность)"], ["Номиналы ВА (ток, мощность)"], ["Формулы"], ["Назад"]],
+                resize_keyboard=True
+            )
+        )
+        user_states[user_id] = "AWAIT_HELP"
+    elif state == "AWAIT_HELP":
+        if text == "Назад":
+            update.message.reply_text("Главное меню:", reply_markup=main_menu_keyboard())
+            user_states.pop(user_id, None)
+        else:
+            # Отправка картинки из памяти
+            file_map = {
+                "Сечение кабеля (ток, мощность)": "sechenie.jpeg",
+                "Номиналы ВА (ток, мощность)": "selectivity.jpeg",
+                "Формулы": "formuly.jpeg"
+            }
+            filename = file_map.get(text)
+            if filename and os.path.exists(filename):
+                update.message.reply_photo(open(filename, 'rb'))
+            else:
+                update.message.reply_text("Картинка не найдена.")
+    elif text == "Уведомление всем":
+        # Проверка прав admin в zones
+        if zones.get(user_id, {}).get('res') == 'admin':
+            update.message.reply_text("Введите сообщение для рассылки:", reply_markup=ReplyKeyboardRemove())
+            user_states[user_id] = "AWAIT_NOTIFY"
+        else:
+            update.message.reply_text("У вас нет прав для рассылки.")
+    elif state == "AWAIT_NOTIFY":
+        msg = text
+        # Рассылка всем пользователям из zones
+        for uid in zones:
+            bot.send_message(chat_id=int(uid), text=msg)
+        update.message.reply_text("Рассылка выполнена.", reply_markup=main_menu_keyboard())
+        user_states.pop(user_id, None)
+    else:
+        update.message.reply_text("Неизвестная команда.", reply_markup=main_menu_keyboard())
 
-    # Fallback
-    text, kb = start_menu(zone)
-    update.message.reply_text(text, reply_markup=kb)
+# Регистрируем хендлеры
+dispatcher.add_handler(CommandHandler('start', start))
+dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_text))
 
-# Webhook
+# --- Webhook ---
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    dispatcher.process_update(Update.de_json(request.get_json(force=True), bot))
+    update = Update.de_json(request.get_json(force=True), bot)
+    dispatcher.process_update(update)
     return "ok"
 
 @app.route("/")
 def index():
-    return "OK"
+    return "Бот работает"
 
-dispatcher.add_handler(CommandHandler("start", start))
-dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
-
-if __name__ == "__main__":
-    def ping():
-        try: requests.get(SELF_URL, timeout=5)
-        except: pass
-        t = threading.Timer(9*60, ping); t.daemon=True; t.start()
-    ping()
-    bot.set_webhook(f"{SELF_URL}/webhook")
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+if __name__ == '__main__':
+    from waitress import serve
+    serve(app, host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
