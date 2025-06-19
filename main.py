@@ -1,6 +1,6 @@
+```python
 import os
 import re
-import threading
 from io import StringIO, BytesIO
 
 import pandas as pd
@@ -63,6 +63,7 @@ def load_zones():
     return zones
 
 # --- Меню клавиатур ---
+
 def main_menu_keyboard():
     return ReplyKeyboardMarkup([["Поиск"], ["Справочная информация"], ["Уведомление всем"]], resize_keyboard=True)
 
@@ -70,7 +71,7 @@ def main_menu_keyboard():
 
 def start(update: Update, context: CallbackContext):
     update.message.reply_text(
-        f"Здравствуйте, {load_zones().get(str(update.message.from_user.id),{}).get('name','пользователь')}!",
+        f"Здравствуйте, {load_zones().get(str(update.message.from_user.id),{{}}).get('name','пользователь')}!",
         reply_markup=main_menu_keyboard()
     )
 
@@ -84,9 +85,8 @@ def handle_text(update: Update, context: CallbackContext):
         update.message.reply_text("Введите номер счётчика:", reply_markup=ReplyKeyboardRemove())
         user_states[user_id] = "AWAIT_NUMBER"
     elif state == "AWAIT_NUMBER":
-        # Здесь логика поиска по BRANCH_SHEETS_MAP и отправка результата
         update.message.reply_text(
-            f"Запрос принят для номерa {text}. Выберите тип информации.",
+            f"Запрос принят для номера {text}. Выберите тип информации.",
             reply_markup=ReplyKeyboardMarkup(
                 [["Договор"], ["Адрес подключения"], ["Прибор учёта"], ["Назад"]],
                 resize_keyboard=True
@@ -96,7 +96,6 @@ def handle_text(update: Update, context: CallbackContext):
     elif isinstance(state, tuple) and state[0] == "AWAIT_INFO":
         _, number = state
         info_type = text
-        # Тут логика чтения нужной Google таблицы и выбор полей по info_type
         update.message.reply_text(f"Информация ({info_type}) по {number}: ...")
         update.message.reply_text("Возвращаемся в главное меню.", reply_markup=main_menu_keyboard())
         user_states.pop(user_id, None)
@@ -114,7 +113,6 @@ def handle_text(update: Update, context: CallbackContext):
             update.message.reply_text("Главное меню:", reply_markup=main_menu_keyboard())
             user_states.pop(user_id, None)
         else:
-            # Отправка картинки из памяти
             file_map = {
                 "Сечение кабеля (ток, мощность)": "sechenie.jpeg",
                 "Номиналы ВА (ток, мощность)": "selectivity.jpeg",
@@ -126,7 +124,6 @@ def handle_text(update: Update, context: CallbackContext):
             else:
                 update.message.reply_text("Картинка не найдена.")
     elif text == "Уведомление всем":
-        # Проверка прав admin в zones
         if zones.get(user_id, {}).get('res') == 'admin':
             update.message.reply_text("Введите сообщение для рассылки:", reply_markup=ReplyKeyboardRemove())
             user_states[user_id] = "AWAIT_NOTIFY"
@@ -134,7 +131,6 @@ def handle_text(update: Update, context: CallbackContext):
             update.message.reply_text("У вас нет прав для рассылки.")
     elif state == "AWAIT_NOTIFY":
         msg = text
-        # Рассылка всем пользователям из zones
         for uid in zones:
             bot.send_message(chat_id=int(uid), text=msg)
         update.message.reply_text("Рассылка выполнена.", reply_markup=main_menu_keyboard())
@@ -158,5 +154,7 @@ def index():
     return "Бот работает"
 
 if __name__ == '__main__':
-    from waitress import serve
-    serve(app, host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
+    # Устанавливаем вебхук и запускаем Flask
+    bot.set_webhook(f"{SELF_URL}/webhook")
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
+```
