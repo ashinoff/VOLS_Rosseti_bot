@@ -30,12 +30,10 @@ BRANCH_URLS = {
 }
 BRANCHES = list(BRANCH_URLS.keys())
 
-# === SETUP ===
 app        = Flask(__name__)
 bot        = Bot(token=TOKEN)
 dispatcher = Dispatcher(bot, None, use_context=True)
 
-# === HELPERS ===
 def normalize_sheet_url(url: str) -> str:
     if 'output=csv' in url or '/export' in url or url.endswith('.csv'):
         return url
@@ -56,190 +54,124 @@ def normalize_sheet_url(url: str) -> str:
 def load_zones():
     url = normalize_sheet_url(ZONES_CSV_URL)
     r   = requests.get(url, timeout=10); r.raise_for_status()
-    text = r.content.decode('utf-8-sig')
-    df   = pd.read_csv(StringIO(text), header=None, skiprows=1)
-    zones, res_zones, names = {}, {}, {}
+    df  = pd.read_csv(StringIO(r.content.decode('utf-8-sig')), header=None, skiprows=1)
+    bz, rz, names = {}, {}, {}
     for _, row in df.iterrows():
         try:
             uid = int(row[2])
         except:
             continue
-        zones[uid]     = str(row[0]).strip()  # Филиал или "All"
-        res_zones[uid] = str(row[1]).strip()  # РЭС или "All"
-        names[uid]     = str(row[3]).strip()  # ФИО
-    return zones, res_zones, names
+        bz[uid]    = row[0].strip()  # Филиал или All
+        rz[uid]    = row[1].strip()  # РЭС или All
+        names[uid] = row[3].strip()  # ФИО
+    return bz, rz, names
 
-# === KEYBOARDS ===
-def main_menu_keyboard(is_all=False):
-    return ReplyKeyboardMarkup(
-        [[ "Выбор филиала" if is_all else "Поиск" ]],
-        resize_keyboard=True
-    )
+def main_kb(is_all):
+    return ReplyKeyboardMarkup([["Выбор филиала"]] if is_all else [["Поиск"]], resize_keyboard=True)
 
-def branches_keyboard():
-    keys = [[b] for b in BRANCHES]
-    keys.append(["Назад"])
-    return ReplyKeyboardMarkup(keys, resize_keyboard=True)
+def branch_kb():
+    return ReplyKeyboardMarkup([[b] for b in BRANCHES], resize_keyboard=True)
 
-def next_actions_keyboard():
-    return ReplyKeyboardMarkup(
-        [["Поиск ТП"], ["Выбор филиала"]],
-        resize_keyboard=True
-    )
+def action_kb():
+    return ReplyKeyboardMarkup([["Поиск ТП"], ["Выбор филиала"]], resize_keyboard=True)
 
-# === HANDLERS ===
-def start(update: Update, context: CallbackContext):
-    user_id = update.message.from_user.id
-    try:
-        branch_zones, res_zones, names = load_zones()
-    except Exception as e:
-        return update.message.reply_text(f"Ошибка загрузки прав доступа: {e}")
-
-    if user_id not in branch_zones:
-        return update.message.reply_text(
-            "К сожалению, у вас нет доступа, обратитесь к администратору."
-        )
-
-    user_branch = branch_zones[user_id]
-    name        = names[user_id]
-    greet       = f"Приветствую Вас, {name}!" if name else "Добро пожаловать!"
-    update.message.reply_text(
-        f"{greet} Нажмите «{'Выбор филиала' if user_branch=='All' else 'Поиск'}».",
-        reply_markup=main_menu_keyboard(user_branch=='All')
-    )
-    context.user_data.clear()
-    context.user_data['branch'] = None
-
-def handle_text(update: Update, context: CallbackContext):
-    text    = update.message.text.strip()
-    user_id = update.message.from_user.id
-
-    try:
-        branch_zones, res_zones, names = load_zones()
-    except Exception as e:
-        return update.message.reply_text(f"Ошибка загрузки прав доступа: {e}")
-
-    if user_id not in branch_zones:
-        return update.message.reply_text(
-            "К сожалению, у вас нет доступа, обратитесь к администратору."
-        )
-
-    user_branch = branch_zones[user_id]
-    user_res    = res_zones[user_id]
-    name        = names[user_id]
-
-    # Кнопка «Выбор филиала»
-    if text == "Выбор филиала":
-        if user_branch == "All":
-            return update.message.reply_text(
-                "Выберите филиал:", reply_markup=branches_keyboard()
-            )
-        else:
-            return update.message.reply_text(
-                f"{name}, вы можете просматривать только филиал {user_branch}.",
-                reply_markup=next_actions_keyboard()
-            )
-
-    # Кнопка «Поиск»
-    if text == "Поиск":
-        if user_branch == "All":
-            return update.message.reply_text(
-                "Выберите филиал:", reply_markup=branches_keyboard()
-            )
-        else:
-            context.user_data['branch'] = user_branch
-            return update.message.reply_text(
-                f"{name}, введите номер ТП.", reply_markup=next_actions_keyboard()
-            )
-
-    # Выбор филиала из списка All
-    if text in BRANCHES:
-        context.user_data['branch'] = text
-        return update.message.reply_text(
-            f"{name}, введите номер ТП.", reply_markup=next_actions_keyboard()
-        )
-
-    # Кнопка «Поиск ТП»
-    if text == "Поиск ТП" and context.user_data.get('branch'):
-        return update.message.reply_text(
-            f"{name}, введите номер ТП.", reply_markup=next_actions_keyboard()
-        )
-
-    # Обработка ввода ТП
-    if context.user_data.get('branch'):
-        branch    = context.user_data['branch']
-        sheet_url = BRANCH_URLS.get(branch)
-        if not sheet_url:
-            return update.message.reply_text(
-                "Не задана таблица для этого филиала.",
-                reply_markup=next_actions_keyboard()
-            )
-        try:
-            csv_url = normalize_sheet_url(sheet_url)
-            r       = requests.get(csv_url, timeout=10); r.raise_for_status()
-            df      = pd.read_csv(StringIO(r.content.decode('utf-8-sig')))
-        except Exception as e:
-            return update.message.reply_text(
-                f"Ошибка загрузки таблицы {branch}: {e}",
-                reply_markup=next_actions_keyboard()
-            )
-
-        tp_input = text.upper().replace("ТП-", "").strip()
-        df['D_UP'] = df['Наименование ТП'].str.upper().str.replace("ТП-", "")
-        found = df[df['D_UP'].str.contains(tp_input, na=False)]
-
-        if found.empty:
-            resp = "Договоров ВОЛС на данной ТП нет, либо название ТП введено некорректно."
-        else:
-            tp_name = found.iloc[0]['Наименование ТП']
-            count   = len(found)
-            lines   = [
-                f"Найдено {count} ВОЛС с договором аренды:",
-                f"{tp_name} находится в {found.iloc[0]['РЭС']}"
-            ]
-            for _, row in found.iterrows():
-                lines.append("")  # пустая строка
-                lines.append(f"ВЛ {row['Наименование ВЛ']}:")
-                lines.append(f"Опоры: {row['Опоры']}")
-                lines.append(f"Кол-во опор: {row['Количество опор']}")
-                lines.append(f"Провайдер: {row['Наименование Провайдера']}")
-            resp = "\n".join(lines)
-
-        update.message.reply_text(resp)
-        return update.message.reply_text(
-            f"{name}, задание выполнено.",
-            reply_markup=next_actions_keyboard()
-        )
-
-    # Во всех остальных случаях
-    return update.message.reply_text(
-        "Нажмите одну из кнопок меню.",
-        reply_markup=main_menu_keyboard(user_branch=='All')
-    )
-
-# === SELF-PING ===
-def ping_self():
-    if not SELF_URL:
-        return
-    while True:
-        try:
-            requests.get(SELF_URL + '/webhook')
-        except:
-            pass
-        time.sleep(300)
-
-# === РЕГИСТРАЦИЯ ОБРАБОТЧИКОВ ===
-dispatcher.add_handler(CommandHandler('start', start))
-dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_text))
-
-# === WEBHOOK ===
 @app.route('/webhook', methods=['POST'])
 def webhook():
     upd = Update.de_json(request.get_json(force=True), bot)
     dispatcher.process_update(upd)
-    return jsonify({'status': 'ok'})
+    return jsonify({'ok':True})
 
-# === START APP ===
-if __name__ == '__main__':
-    threading.Thread(target=ping_self, daemon=True).start()
-    app.run(host='0.0.0.0', port=int(os.getenv('PORT', 5000)))
+def start(update: Update, context: CallbackContext):
+    uid = update.message.from_user.id
+    try:
+        bz, rz, names = load_zones()
+    except Exception as e:
+        return update.message.reply_text(f"Ошибка загрузки прав доступа: {e}")
+    if uid not in bz:
+        return update.message.reply_text("К сожалению, у вас нет доступа, обратитесь к администратору.")
+    branch = bz[uid]; res = rz[uid]; name = names[uid]
+    if branch=="All":
+        text = f"Приветствую Вас, {name}! Вы можете просматривать только филиал ЭС."
+        # для ALL: кнопка только Выбор филиала
+        update.message.reply_text(text+"\nНажмите «Выбор филиала».", reply_markup=main_kb(True))
+    else:
+        text = f"Приветствую Вас, {name}! Вы можете просматривать только филиал {branch}."
+        update.message.reply_text(text+"\nНажмите «Поиск».", reply_markup=main_kb(False))
+    context.user_data.clear()
+    context.user_data['branch']=None
+
+def handle_text(update: Update, context: CallbackContext):
+    text = update.message.text.strip()
+    uid = update.message.from_user.id
+    bz, rz, names = load_zones()
+    if uid not in bz:
+        return update.message.reply_text("К сожалению, у вас нет доступа, обратитесь к администратору.")
+    branch = bz[uid]; res=rz[uid]; name=names[uid]
+
+    # Выбор филиала
+    if text=="Выбор филиала":
+        if branch=="All":
+            return update.message.reply_text("Выберите филиал:", reply_markup=branch_kb())
+        else:
+            return update.message.reply_text(
+                f"Приветствую Вас, {name}! Вы можете просматривать только филиал {branch}.",
+                reply_markup=action_kb()
+            )
+
+    # Поиск / Поиск ТП
+    if text in ("Поиск","Поиск ТП"):
+        if branch=="All":
+            return update.message.reply_text("Выберите филиал:", reply_markup=branch_kb())
+        context.user_data['branch']=branch
+        return update.message.reply_text(f"{name}, введите номер ТП.", reply_markup=action_kb())
+
+    # Выбор филиала из списка
+    if text in BRANCHES:
+        context.user_data['branch']=text
+        return update.message.reply_text(f"{name}, введите номер ТП.", reply_markup=action_kb())
+
+    # Обработка ТП
+    if context.user_data.get('branch'):
+        br = context.user_data['branch']
+        url=BRANCH_URLS[br]
+        try:
+            df=pd.read_csv(normalize_sheet_url(url))
+        except Exception as e:
+            return update.message.reply_text(f"Ошибка загрузки таблицы: {e}", reply_markup=action_kb())
+        # зона3: конкретный РЭС
+        if branch!="All" and res!="All":
+            df=df[df["РЭС"]==res]
+        tp=text.upper().replace("ТП-","").strip()
+        df['D']=df['Наименование ТП'].str.upper().str.replace("ТП-","")
+        found=df[df['D'].str.contains(tp,na=False)]
+        if found.empty:
+            resp="Договоров ВОЛС на данной ТП нет, либо название ТП введено некорректно."
+        else:
+            lines=[f"Найдено {len(found)} ВОЛС с договором аренды:",
+                   f"{found.iloc[0]['Наименование ТП']} находится в {found.iloc[0]['РЭС']}"]
+            for _,r in found.iterrows():
+                lines.append("")  # раздел
+                lines.append(f"ВЛ {r['Наименование ВЛ']}:")
+                lines.append(f"Опоры: {r['Опоры']}")
+                lines.append(f"Кол-во опор: {r['Количество опор']}")
+                lines.append(f"Провайдер: {r['Наименование Провайдера']}")
+            resp="\n".join(lines)
+        update.message.reply_text(resp)
+        return update.message.reply_text(f"{name}, задание выполнено.", reply_markup=action_kb())
+
+    # Иначе
+    return update.message.reply_text("Нажмите одну из кнопок меню.", reply_markup=main_kb(branch=="All"))
+
+dispatcher.add_handler(CommandHandler('start', start))
+dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_text))
+
+def ping():
+    if not SELF_URL: return
+    while True:
+        try: requests.get(f"{SELF_URL}/webhook")
+        except: pass
+        time.sleep(300)
+
+if __name__=='__main__':
+    threading.Thread(target=ping,daemon=True).start()
+    app.run(host='0.0.0.0', port=int(os.getenv('PORT',5000)))
