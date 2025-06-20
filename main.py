@@ -18,8 +18,8 @@ ZONES_CSV_URL = os.getenv("ZONES_CSV_URL", "").strip()
 # format: "Branch1=GID1,Branch2=GID2,..."
 BRANCH_SHEETS_MAP = {
     k.strip(): int(v.strip())
-    for k,v in (
-        p.split("=",1) for p in os.getenv("BRANCH_SHEETS_MAP", "").split(",") if "=" in p
+    for k, v in (
+        p.split("=", 1) for p in os.getenv("BRANCH_SHEETS_MAP", "").split(",") if "=" in p
     )
 }
 
@@ -50,7 +50,7 @@ def load_zones() -> dict:
     resp.raise_for_status()
     df = pd.read_csv(StringIO(resp.text), dtype=str)
     df.columns = df.columns.str.strip().str.upper()
-    required = {"ФИЛИАЛ","РЭС","ID","ФИО"}
+    required = {"ФИЛИАЛ", "РЭС", "ID", "ФИО"}
     missing = required - set(df.columns)
     if missing:
         raise ValueError(f"В файле зон не все колонки: {missing}")
@@ -65,9 +65,9 @@ def load_zones() -> dict:
     return zones
 
 # --- Keyboards ---
-def main_menu()
+def main_menu():
     return ReplyKeyboardMarkup(
-        [["Поиск"],["Справочная информация"],["Уведомление всем"]],
+        [["Поиск"], ["Справочная информация"], ["Уведомление всем"]],
         resize_keyboard=True
     )
 
@@ -78,52 +78,60 @@ def branches_keyboard():
 
 # --- Handlers ---
 
-def start(update:Update, context:CallbackContext):
+def start(update: Update, context: CallbackContext):
     uid = str(update.message.from_user.id)
-    name = load_zones().get(uid,{}).get('name','пользователь')
+    name = load_zones().get(uid, {}).get('name', 'пользователь')
     update.message.reply_text(f"Здравствуйте, {name}!", reply_markup=main_menu())
     user_states.pop(uid, None)
     user_data.pop(uid, None)
 
 
-def search(update:Update, context:CallbackContext):
+def search(update: Update, context: CallbackContext):
     uid = str(update.message.from_user.id)
     zones = load_zones()
     user = zones.get(uid)
     if not user:
         update.message.reply_text("У вас нет прав доступа.", reply_markup=main_menu())
         return
-    if user['filial'].lower()=='all':
+    if user['filial'].lower() == 'all':
         update.message.reply_text("Выберите филиал:", reply_markup=branches_keyboard())
-        user_states[uid]='CHOOSE_BRANCH'
+        user_states[uid] = 'CHOOSE_BRANCH'
     else:
-        user_data[uid] = {'filial':user['filial'], 'gid': BRANCH_SHEETS_MAP.get(user['filial'],0)}
-        update.message.reply_text(f"Введите номер ТП для филиала {user['filial']}:", reply_markup=ReplyKeyboardMarkup([["Назад"]],resize_keyboard=True))
-        user_states[uid]='ENTER_TP'
+        user_data[uid] = {'filial': user['filial'], 'gid': BRANCH_SHEETS_MAP.get(user['filial'], 0)}
+        update.message.reply_text(
+            f"Введите номер ТП для филиала {user['filial']}:",
+            reply_markup=ReplyKeyboardMarkup([["Назад"]], resize_keyboard=True)
+        )
+        user_states[uid] = 'ENTER_TP'
 
 
-def text_handler(update:Update, context:CallbackContext):
+def text_handler(update: Update, context: CallbackContext):
     uid = str(update.message.from_user.id)
     state = user_states.get(uid)
     text = update.message.text.strip()
 
-    if state=='CHOOSE_BRANCH':
-        if text=='Назад':
-            start(update, context); return
+    if state == 'CHOOSE_BRANCH':
+        if text == 'Назад':
+            start(update, context)
+            return
         if text in BRANCH_SHEETS_MAP:
-            user_data[uid]={'filial':text,'gid':BRANCH_SHEETS_MAP[text]}
-            update.message.reply_text(f"Введите номер ТП для филиала {text}:", reply_markup=ReplyKeyboardMarkup([["Назад"]],resize_keyboard=True))
-            user_states[uid]='ENTER_TP'
+            user_data[uid] = {'filial': text, 'gid': BRANCH_SHEETS_MAP[text]}
+            update.message.reply_text(
+                f"Введите номер ТП для филиала {text}:",
+                reply_markup=ReplyKeyboardMarkup([["Назад"]], resize_keyboard=True)
+            )
+            user_states[uid] = 'ENTER_TP'
         else:
             update.message.reply_text("Неверный выбор, выберите филиал.", reply_markup=branches_keyboard())
-    elif state=='ENTER_TP':
-        if text=='Назад':
-            search(update, context); return
+    elif state == 'ENTER_TP':
+        if text == 'Назад':
+            search(update, context)
+            return
         # дальше логика поиска по введенному TP: загрузить файл филиала по gid и искать
         # ... ваш код тут ...
         update.message.reply_text("Результаты поиска ТП (здесь ваш результат)", reply_markup=main_menu())
-        user_states.pop(uid)
-        user_data.pop(uid)
+        user_states.pop(uid, None)
+        user_data.pop(uid, None)
     else:
         update.message.reply_text("Пожалуйста, воспользуйтесь меню.", reply_markup=main_menu())
 
@@ -139,5 +147,5 @@ def webhook():
     dispatcher.process_update(upd)
     return 'OK'
 
-if __name__=='__main__':
-    app.run(host='0.0.0.0', port=int(os.getenv('PORT',5000)))
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=int(os.getenv('PORT', 5000)))
