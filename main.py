@@ -55,12 +55,6 @@ def normalize_sheet_url(url: str) -> str:
     return url
 
 def load_zones():
-    """
-    Возвращает три словаря:
-      branch_zones[uid] = филиал (str)
-      res_zones[uid]    = РЭС     (str)
-      names[uid]        = ФИО     (str)
-    """
     url = normalize_sheet_url(ZONES_CSV_URL)
     r   = requests.get(url, timeout=10); r.raise_for_status()
     text = r.content.decode('utf-8-sig')
@@ -71,9 +65,9 @@ def load_zones():
             uid = int(row[2])
         except:
             continue
-        branch_zones[uid] = str(row[0]).strip()  # колонка A
-        res_zones[uid]    = str(row[1]).strip()  # колонка B
-        names[uid]        = str(row[3]).strip()  # колонка D
+        branch_zones[uid] = str(row[0]).strip()
+        res_zones[uid]    = str(row[1]).strip()
+        names[uid]        = str(row[3]).strip()
     return branch_zones, res_zones, names
 
 # === KEYBOARDS ===
@@ -98,17 +92,16 @@ def start(update: Update, context: CallbackContext):
         branch_zones, res_zones, names = load_zones()
     except Exception as e:
         return update.message.reply_text(f"Ошибка загрузки прав доступа: {e}")
-    # если пользователя нет в списке
     if user_id not in branch_zones:
         return update.message.reply_text(
             "К сожалению, у вас нет доступа, обратитесь к администратору."
         )
     branch = branch_zones[user_id]
-    # особое приветствие, если конкретный филиал и все РЭС
-    if branch != "All" and res_zones.get(user_id, "") == "All":
-        greet_text = f"Приветствую Вас, {names[user_id]}! Вы можете просматривать весь филиал."
+    # Если конкретный филиал + All в РЭС
+    if branch != "All" and res_zones[user_id] == "All":
+        greet_text = f"Приветствую Вас, {names[user_id]}! Вы можете просматривать только филиал {branch}."
     else:
-        greet_text = f"Приветствую Вас, {names[user_id]}!" if names[user_id] else "Добро пожаловать!"
+        greet_text = f"Приветствую Вас, {names[user_id]}!"
     update.message.reply_text(
         f"{greet_text} Нажмите «{'Выбор филиала' if branch=='All' else 'Поиск'}».",
         reply_markup=main_menu_keyboard(branch=='All')
@@ -123,7 +116,6 @@ def handle_text(update: Update, context: CallbackContext):
         branch_zones, res_zones, names = load_zones()
     except Exception as e:
         return update.message.reply_text(f"Ошибка загрузки прав доступа: {e}")
-    # если пользователя нет в списке
     if user_id not in branch_zones:
         return update.message.reply_text(
             "К сожалению, у вас нет доступа, обратитесь к администратору."
@@ -133,7 +125,7 @@ def handle_text(update: Update, context: CallbackContext):
     user_res    = res_zones[user_id]
     name        = names[user_id]
 
-    # Назад → главное меню
+    # Назад → главное
     if text == "Назад":
         return start(update, context)
 
@@ -141,7 +133,7 @@ def handle_text(update: Update, context: CallbackContext):
     if user_branch == "All" and text == "Выбор филиала":
         return update.message.reply_text("Выберите филиал:", reply_markup=branches_keyboard())
 
-    # Пользователь с филиалом сразу к поиску
+    # Пользователь с конкретным филиалом сразу к вводу ТП
     if user_branch != "All" and text == "Поиск":
         context.user_data['branch'] = user_branch
         context.user_data['res']    = user_res
@@ -159,10 +151,10 @@ def handle_text(update: Update, context: CallbackContext):
     if context.user_data.get('await') and context.user_data.get('branch'):
         branch   = context.user_data['branch']
         res_perm = context.user_data['res']
-
         sheet_url = BRANCH_URLS.get(branch)
         if not sheet_url:
             return update.message.reply_text("Не задана таблица для этого филиала.")
+
         try:
             csv_url = normalize_sheet_url(sheet_url)
             r       = requests.get(csv_url, timeout=10); r.raise_for_status()
@@ -174,6 +166,7 @@ def handle_text(update: Update, context: CallbackContext):
         df['D_UP'] = df['Наименование ТП'].str.upper().str.replace("ТП-", "")
         found_all = df[df['D_UP'].str.contains(tp_input, na=False)]
 
+        # Ограничение по РЭС
         if not found_all.empty and res_perm != "All":
             found = found_all[found_all['РЭС'] == res_perm]
             if found.empty:
@@ -184,29 +177,32 @@ def handle_text(update: Update, context: CallbackContext):
         else:
             found = found_all
 
+        # Формируем ответ
         if found.empty:
             resp = "Договоров ВОЛС на данной ТП нет, либо название ТП введено некорректно."
         else:
-            count = len(found)
+            count   = len(found)
             res_name = found.iloc[0]['РЭС']
-            lines = [f"Найдено {count} ВОЛС с договором аренды:",
-                     f"{found.iloc[0]['Наименование ТП']} находится в {res_name}"]
+            tp_name = found.iloc[0]['Наименование ТП']
+            lines = [
+                f"Найдено {count} ВОЛС с договором аренды:",
+                f"{tp_name} находится в {res_name}"
+            ]
             for _, row in found.iterrows():
-                lines.append("")
-                lines.append(
-                    f"ВЛ {row['Наименование ВЛ']}: **Опоры**: {row['Опоры']}, "
-                    f"Кол-во опор: {row['Количество опор']}, Провайдер: {row['Наименование Провайдера']}"
-                )
+                lines.append("")  # пустая строка-разделитель
+                lines.append(f"ВЛ {row['Наименование ВЛ']}: Опоры: {row['Опоры']}")
+                lines.append(f"Кол-во опор: {row['Количество опор']}")
+                lines.append(f"Провайдер: {row['Наименование Провайдера']}")
             resp = "\n".join(lines)
 
         update.message.reply_text(resp, reply_markup=search_tp_keyboard())
-        update.message.reply_text(
+        # После результата – сразу предложение
+        return update.message.reply_text(
             f"{name}, введите номер ТП или выберите Филиал ЭС",
             reply_markup=search_tp_keyboard()
         )
-        return
 
-    # Во всех остальных случаях
+    # Всё остальное
     return update.message.reply_text(
         "Нажмите одну из кнопок меню.",
         reply_markup=main_menu_keyboard(user_branch=='All')
