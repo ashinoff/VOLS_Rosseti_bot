@@ -14,9 +14,9 @@ TOKEN         = os.getenv("TOKEN")
 SELF_URL      = os.getenv("SELF_URL", "").rstrip('/')
 ZONES_CSV_URL = os.getenv("ZONES_CSV_URL", "").strip()
 
-# Филиальные таблицы
+# === Филиальные таблицы ===
 BRANCH_URLS = {
-    "Юго-Западные ЭС": os.getenv("YUGO_ZAPAD_ES_URL", ""),
+    "Юго-Западные ЭС":   os.getenv("YUGO_ZAPAD_ES_URL", ""),
     "Усть-Лабинские ЭС": os.getenv("UST_LAB_ES_URL", ""),
     "Тимашевские ЭС":    os.getenv("TIMASHEV_ES_URL", ""),
     "Тихорецкие ЭС":     os.getenv("TIKHORETS_ES_URL", ""),
@@ -28,13 +28,12 @@ BRANCH_URLS = {
     "Армавирские ЭС":    os.getenv("ARMAVIR_ES_URL", ""),
     "Адыгейские ЭС":     os.getenv("ADYGEA_ES_URL", ""),
 }
-
 BRANCHES = list(BRANCH_URLS.keys())
 
 # === SETUP ===
-app         = Flask(__name__)
-bot         = Bot(token=TOKEN)
-dispatcher  = Dispatcher(bot, None, use_context=True)
+app        = Flask(__name__)
+bot        = Bot(token=TOKEN)
+dispatcher = Dispatcher(bot, None, use_context=True)
 
 # === HELPERS ===
 def normalize_sheet_url(url: str) -> str:
@@ -176,21 +175,32 @@ def handle_text(update: Update, context: CallbackContext):
         if found.empty:
             resp = "Совпадений не найдено."
         else:
-            tp_name = found.iloc[0]['Наименование ТП']
-            count   = len(found)
-            # Формируем ответ
-            lines = [f"Найдено {count} ВОЛС с договором аренды:"]
-            lines.append(f"{tp_name} находится в {branch} РЭС")
+            tp_name  = found.iloc[0]['Наименование ТП']
+            res_name = found.iloc[0]['РЭС']
+            count    = len(found)
+
+            lines = []
+            lines.append(f"Найдено {count} ВОЛС с договором аренды:")
+            lines.append(f"{tp_name} находится в {res_name} РЭС")
+            lines.append("")  # пустая строка перед деталями
+
             for _, row in found.iterrows():
                 lines.append(
-                    f"ВЛ {row['Наименование ВЛ']}: Опоры: {row['Опоры']}, "
+                    f"ВЛ {row['Наименование ВЛ']}: Опоры: **{row['Опоры']}**, "
                     f"Кол-во опор: {row['Количество опор']}, Провайдер: {row['Наименование Провайдера']}"
                 )
-            resp = "\n".join(lines)
+                lines.append("")  # разделитель между записями
+
+            resp = "\n".join(lines).strip()
 
         context.user_data.pop('await_tp')
-        return update.message.reply_text(resp, reply_markup=search_tp_keyboard())
+        return update.message.reply_text(
+            resp,
+            reply_markup=search_tp_keyboard(),
+            parse_mode='Markdown'
+        )
 
+    # Любой другой ввод
     return update.message.reply_text(
         "Нажмите одну из кнопок меню.",
         reply_markup=main_menu_keyboard(filial=='All')
