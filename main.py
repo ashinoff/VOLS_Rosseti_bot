@@ -10,14 +10,11 @@ from telegram import Bot, Update, ReplyKeyboardMarkup
 from telegram.ext import Dispatcher, CommandHandler, MessageHandler, Filters, CallbackContext
 
 # === ENVIRONMENT VARIABLES ===
-# TOKEN           - Telegram Bot Token
-# SELF_URL        - URL of this service (for self-ping), без конца "/"
-# ZONES_CSV_URL   - Google Sheets CSV export URL (publish → “CSV”)
 TOKEN = os.getenv("TOKEN")
 SELF_URL = os.getenv("SELF_URL", "").rstrip('/')
 ZONES_CSV_URL = os.getenv("ZONES_CSV_URL", "").strip()
 
-# === HARD-CODED BRANCH BUTTONS ===
+# === BRANCH BUTTONS ===
 BRANCHES = [
     "Краснодарские ЭС",
     "Сочинские ЭС",
@@ -31,15 +28,13 @@ BRANCHES = [
     "Лабинские ЭС",
 ]
 
-# === FLASK & TELEGRAM SETUP ===
+# === SETUP ===
 app = Flask(__name__)
 bot = Bot(token=TOKEN)
 dispatcher = Dispatcher(bot, None, use_context=True)
 
 # === HELPERS ===
-
 def normalize_sheet_url(url: str) -> str:
-    """Преобразует любой опубликованный Google Sheets URL в CSV-экспорт."""
     if 'output=csv' in url or '/export' in url or url.endswith('.csv'):
         return url
     m = re.search(r'/d/e/([\w-]+)/', url)
@@ -57,22 +52,14 @@ def normalize_sheet_url(url: str) -> str:
     return url
 
 def load_zones() -> (dict, dict):
-    """
-    Загружает CSV без учёта заголовков:
-    Колонка A — филиал, B — РЭС, C — ID, D — ФИО.
-    Возвращает два словаря:
-      zones_map: user_id -> филиал
-      names_map: user_id -> ФИО
-    """
     url = normalize_sheet_url(ZONES_CSV_URL)
     resp = requests.get(url, timeout=10)
     resp.raise_for_status()
-    df = pd.read_csv(StringIO(resp.text), header=None, skiprows=1)
+    text = resp.content.decode('utf-8-sig')  # принудительно в UTF-8, отрезая BOM
+    df = pd.read_csv(StringIO(text), header=None, skiprows=1)
     if df.shape[1] < 4:
         raise ValueError(f"В таблице должно быть минимум 4 колонки, найдено {df.shape[1]}")
-    # столбцы: 0=филиал,1=РЭС,2=ID,3=ФИО
-    zones_map = {}
-    names_map = {}
+    zones_map, names_map = {}, {}
     for _, row in df.iterrows():
         try:
             uid = int(row[2])
@@ -83,7 +70,6 @@ def load_zones() -> (dict, dict):
     return zones_map, names_map
 
 # === KEYBOARDS ===
-
 def main_menu_keyboard():
     return ReplyKeyboardMarkup([['Поиск']], resize_keyboard=True)
 
@@ -93,7 +79,6 @@ def branches_keyboard():
     return ReplyKeyboardMarkup(keys, resize_keyboard=True)
 
 # === HANDLERS ===
-
 def start(update: Update, context: CallbackContext):
     user_id = update.message.from_user.id
     try:
@@ -104,9 +89,9 @@ def start(update: Update, context: CallbackContext):
 
     name = names.get(user_id)
     if name:
-        greeting = f"Привет, {name}! Нажмите 'Поиск' для выбора филиала."
+        greeting = f'Приветствую Вас, "{name}"! Нажмите «Поиск» для выбора филиала.'
     else:
-        greeting = "Добро пожаловать! Нажмите 'Поиск' для выбора филиала."
+        greeting = 'Добро пожаловать! Нажмите «Поиск» для выбора филиала.'
     update.message.reply_text(greeting, reply_markup=main_menu_keyboard())
 
 def handle_search(update: Update, context: CallbackContext):
@@ -125,8 +110,7 @@ def handle_search(update: Update, context: CallbackContext):
     else:
         update.message.reply_text("У вас нет прав доступа.")
 
-# === SELF-PING TO KEEP ALIVE ===
-
+# === SELF-PING ===
 def ping_self():
     if not SELF_URL:
         return
@@ -137,21 +121,18 @@ def ping_self():
             pass
         time.sleep(300)
 
-# === REGISTER HANDLERS ===
-
+# === REGISTER ===
 dispatcher.add_handler(CommandHandler('start', start))
 dispatcher.add_handler(MessageHandler(Filters.regex('^Поиск$'), handle_search))
 
-# === WEBHOOK ROUTE ===
-
+# === WEBHOOK ===
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    update = Update.de_json(request.get_json(force=True), bot)
-    dispatcher.process_update(update)
+    upd = Update.de_json(request.get_json(force=True), bot)
+    dispatcher.process_update(upd)
     return jsonify({'status': 'ok'})
 
-# === RUN APPLICATION ===
-
+# === MAIN ===
 if __name__ == '__main__':
     threading.Thread(target=ping_self, daemon=True).start()
     app.run(host='0.0.0.0', port=int(os.getenv('PORT', 5000)))
