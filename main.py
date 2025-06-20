@@ -101,9 +101,13 @@ def start(update: Update, context: CallbackContext):
         return update.message.reply_text(f"Ошибка загрузки прав доступа: {e}")
     branch = branch_zones.get(user_id, "")
     name   = names.get(user_id, "")
-    greet  = f"Приветствую Вас, {name}!" if name else "Добро пожаловать!"
+    # Новый текст приветствия для случая branch != All, res == All
+    if branch != "All" and res_zones.get(user_id, "") == "All":
+        greet_text = f"Приветствую Вас, {name}! Вы можете просматривать весь филиал."
+    else:
+        greet_text = f"Приветствую Вас, {name}!" if name else "Добро пожаловать!"
     update.message.reply_text(
-        f"{greet} Нажмите «{'Выбор филиала' if branch=='All' else 'Поиск'}».",
+        f"{greet_text} Нажмите «{'Выбор филиала' if branch=='All' else 'Поиск'}».",
         reply_markup=main_menu_keyboard(branch=='All')
     )
     context.user_data.clear()
@@ -135,20 +139,15 @@ def handle_text(update: Update, context: CallbackContext):
         context.user_data['branch'] = user_branch
         context.user_data['res']    = user_res
         context.user_data['await']  = True
-        return update.message.reply_text(
-            f"Выбран филиал {user_branch}. Введите номер ТП:",
-            reply_markup=search_tp_keyboard()
-        )
+        # Новый текст приглашения
+        return update.message.reply_text("Введите номер ТП:", reply_markup=search_tp_keyboard())
 
     # Выбор филиала из списка для ALL
     if user_branch == "All" and text in BRANCHES:
         context.user_data['branch'] = text
         context.user_data['res']    = "All"
         context.user_data['await']  = True
-        return update.message.reply_text(
-            f"Выбран филиал {text}. Введите номер ТП:",
-            reply_markup=search_tp_keyboard()
-        )
+        return update.message.reply_text("Введите номер ТП:", reply_markup=search_tp_keyboard())
 
     # Обработка ввода ТП
     if context.user_data.get('await') and context.user_data.get('branch'):
@@ -166,13 +165,11 @@ def handle_text(update: Update, context: CallbackContext):
         except Exception as e:
             return update.message.reply_text(f"Ошибка загрузки таблицы {branch}: {e}")
 
-        # ищем первые совпадения по TP
         tp_input = text.upper().replace("ТП-", "").strip()
         df['D_UP'] = df['Наименование ТП'].str.upper().str.replace("ТП-", "")
         found_all = df[df['D_UP'].str.contains(tp_input, na=False)]
 
-        # права: если есть общие совпадения, но без права на их просмотр
-        # сначала отфильтруем по РЭС
+        # права: фильтрация по РЭС
         if not found_all.empty and res_perm != "All":
             found = found_all[found_all['РЭС'] == res_perm]
             if found.empty:
@@ -184,24 +181,21 @@ def handle_text(update: Update, context: CallbackContext):
             found = found_all
 
         if found.empty:
-            resp = "Совпадений не найдено."
+            resp = "Договоров ВОЛС на данной ТП нет, либо название ТП введено некорректно."
         else:
-            # Группируем вывод:
             count = len(found)
-            # Получаем РЭС из первой строки результата
             res_name = found.iloc[0]['РЭС']
             lines = [f"Найдено {count} ВОЛС с договором аренды:",
                      f"{found.iloc[0]['Наименование ТП']} находится в {res_name}"]
-            # Для читабельности пустая строка между ВЛ
             for _, row in found.iterrows():
-                lines.append("")  # разделитель
+                lines.append("")
                 lines.append(
                     f"ВЛ {row['Наименование ВЛ']}: **Опоры**: {row['Опоры']}, "
                     f"Кол-во опор: {row['Количество опор']}, Провайдер: {row['Наименование Провайдера']}"
                 )
             resp = "\n".join(lines)
 
-        # После ответа остаёмся в режиме await и предлагаем новый ввод
+        # Ответ и приглашение вводить новую ТП или выбрать филиал
         update.message.reply_text(resp, reply_markup=search_tp_keyboard())
         update.message.reply_text(
             f"{name}, введите номер ТП или выберите Филиал ЭС",
