@@ -82,8 +82,9 @@ def branches_keyboard():
     keys.append(["Назад"])
     return ReplyKeyboardMarkup(keys, resize_keyboard=True)
 
-def search_tp_keyboard():
-    return ReplyKeyboardMarkup([["Выбор филиала"]], resize_keyboard=True)
+def branch_keyboard(branch_name: str):
+    # После поиска – одна кнопка с именем филиала
+    return ReplyKeyboardMarkup([[branch_name]], resize_keyboard=True)
 
 # === HANDLERS ===
 def start(update: Update, context: CallbackContext):
@@ -97,13 +98,12 @@ def start(update: Update, context: CallbackContext):
             "К сожалению, у вас нет доступа, обратитесь к администратору."
         )
     branch = branch_zones[user_id]
-    # Если конкретный филиал + All в РЭС
     if branch != "All" and res_zones[user_id] == "All":
-        greet_text = f"Приветствую Вас, {names[user_id]}! Вы можете просматривать только филиал {branch}."
+        greet = f"Приветствую Вас, {names[user_id]}! Вы можете просматривать только филиал {branch}."
     else:
-        greet_text = f"Приветствую Вас, {names[user_id]}!"
+        greet = f"Приветствую Вас, {names[user_id]}!"
     update.message.reply_text(
-        f"{greet_text} Нажмите «{'Выбор филиала' if branch=='All' else 'Поиск'}».",
+        f"{greet} Нажмите «{'Выбор филиала' if branch=='All' else 'Поиск'}».",
         reply_markup=main_menu_keyboard(branch=='All')
     )
     context.user_data.clear()
@@ -125,6 +125,13 @@ def handle_text(update: Update, context: CallbackContext):
     user_res    = res_zones[user_id]
     name        = names[user_id]
 
+    # Нажали кнопку с названием филиала
+    if context.user_data.get('branch') and text == context.user_data['branch']:
+        return update.message.reply_text(
+            f"{name}, вы можете просматривать только филиал {user_branch}.",
+            reply_markup=branch_keyboard(user_branch)
+        )
+
     # Назад → главное
     if text == "Назад":
         return start(update, context)
@@ -138,14 +145,14 @@ def handle_text(update: Update, context: CallbackContext):
         context.user_data['branch'] = user_branch
         context.user_data['res']    = user_res
         context.user_data['await']  = True
-        return update.message.reply_text("Введите номер ТП:", reply_markup=search_tp_keyboard())
+        return update.message.reply_text("Введите номер ТП:", reply_markup=branch_keyboard(user_branch))
 
     # Выбор филиала из списка
     if user_branch == "All" and text in BRANCHES:
         context.user_data['branch'] = text
         context.user_data['res']    = "All"
         context.user_data['await']  = True
-        return update.message.reply_text("Введите номер ТП:", reply_markup=search_tp_keyboard())
+        return update.message.reply_text("Введите номер ТП:", reply_markup=branch_keyboard(text))
 
     # Обработка ввода ТП
     if context.user_data.get('await') and context.user_data.get('branch'):
@@ -172,7 +179,7 @@ def handle_text(update: Update, context: CallbackContext):
             if found.empty:
                 return update.message.reply_text(
                     f"{name}, к сожалению, у вас нет прав просмотра данной ТП.",
-                    reply_markup=search_tp_keyboard()
+                    reply_markup=branch_keyboard(branch)
                 )
         else:
             found = found_all
@@ -181,9 +188,9 @@ def handle_text(update: Update, context: CallbackContext):
         if found.empty:
             resp = "Договоров ВОЛС на данной ТП нет, либо название ТП введено некорректно."
         else:
-            count   = len(found)
+            count    = len(found)
             res_name = found.iloc[0]['РЭС']
-            tp_name = found.iloc[0]['Наименование ТП']
+            tp_name  = found.iloc[0]['Наименование ТП']
             lines = [
                 f"Найдено {count} ВОЛС с договором аренды:",
                 f"{tp_name} находится в {res_name}"
@@ -195,11 +202,13 @@ def handle_text(update: Update, context: CallbackContext):
                 lines.append(f"Провайдер: {row['Наименование Провайдера']}")
             resp = "\n".join(lines)
 
-        update.message.reply_text(resp, reply_markup=search_tp_keyboard())
-        # После результата – сразу предложение
+        # сбрасываем ожидание
+        context.user_data.pop('await')
+        # вывод результата и сразу предлагаем ввести новую ТП или нажать филиал
+        update.message.reply_text(resp, reply_markup=branch_keyboard(branch))
         return update.message.reply_text(
-            f"{name}, введите номер ТП или выберите Филиал ЭС",
-            reply_markup=search_tp_keyboard()
+            f"{name}, введите номер ТП или нажмите «{branch}» для смены филиала.",
+            reply_markup=branch_keyboard(branch)
         )
 
     # Всё остальное
