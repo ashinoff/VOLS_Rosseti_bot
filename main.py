@@ -1,4 +1,3 @@
-```python
 import os
 import threading
 import time
@@ -202,4 +201,3 @@ def webhook():
 if __name__ == '__main__':
     threading.Thread(target=ping_self, daemon=True).start()
     app.run(host='0.0.0.0', port=int(os.getenv('PORT', 5000)))
-```
