@@ -27,15 +27,22 @@ user_states = {}   # user_id -> state
 
 def normalize_sheet_url(url: str, default_gid: int = 0) -> str:
     """
-    Преобразует общий URL Google Sheets в прямую ссылку экспорта CSV.
+    Преобразует ссылку Google Sheets или Google Drive на CSV-документ в прямую ссылку для скачивания CSV.
     """
-    if '/export' in url:
+    # если уже корректный экспорт
+    if '/export' in url or url.startswith('https://') and url.endswith('.csv'):
         return url
+    # Google Sheets URL
     m = re.search(r'/d/([a-zA-Z0-9_-]+)', url)
-    if not m:
-        return url
-    sheet_id = m.group(1)
-    return f'https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={default_gid}'
+    if m:
+        sheet_id = m.group(1)
+        return f'https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={default_gid}'
+    # Google Drive file URL
+    m2 = re.search(r'/file/d/([a-zA-Z0-9_-]+)', url)
+    if m2:
+        file_id = m2.group(1)
+        return f'https://drive.google.com/uc?export=download&id={file_id}'
+    return url
 
 
 def load_zones() -> dict:
@@ -43,6 +50,7 @@ def load_zones() -> dict:
     url = normalize_sheet_url(ZONES_CSV_URL)
     response = requests.get(url, timeout=10)
     response.raise_for_status()
+    # читаем CSV
     df = pd.read_csv(StringIO(response.text), dtype=str)
     required = {"Филиал", "РЭС", "ID", "ФИО"}
     missing = required.difference(df.columns)
