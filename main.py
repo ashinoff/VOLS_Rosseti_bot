@@ -10,39 +10,27 @@ from telegram import Bot, Update, ReplyKeyboardMarkup
 from telegram.ext import Dispatcher, CommandHandler, MessageHandler, Filters, CallbackContext
 
 # === ENVIRONMENT VARIABLES ===
-# TOKEN                  — ваш Telegram Bot Token
-# SELF_URL               — URL этого сервиса (для self-ping)
-# ZONES_CSV_URL          — ссылка на CSV-таблицу зон доступа
-# ИД каждой филиальной таблицы (любые названия ENV, главное потом в коде ими пользоваться):
-# YUGO_ZAPAD_ES_URL      
-# UST_LAB_ES_URL         
-# TIMASHEV_ES_URL        
-# TIKHORETS_ES_URL       
-# SOCH_ES_URL            
-# SLAV_ES_URL            
-# LENINGRAD_ES_URL       
-# LABIN_ES_URL           
-# KRASN_ES_URL           
-# ARMAVIR_ES_URL         
-# ADYGEA_ES_URL          
 TOKEN = os.getenv("TOKEN")
 SELF_URL = os.getenv("SELF_URL", "").rstrip('/')
 ZONES_CSV_URL = os.getenv("ZONES_CSV_URL", "").strip()
 
-# === BRANCHES ===
-BRANCHES = [
-    "Краснодарские ЭС",
-    "Сочинские ЭС",
-    "Юго-Западные ЭС",
-    "Адыгейские ЭС",
-    "Тихорецкие ЭС",
-    "Армавирские ЭС",
-    "Усть-Лабинские ЭС",
-    "Тимашевские ЭС",
-    "Славянские ЭС",
-    "Лабинские ЭС",
-    "Ленинградские ЭС",
-]
+# Филиальные таблицы
+BRANCH_URLS = {
+    "Юго-Западные ЭС": os.getenv("YUGO_ZAPAD_ES_URL", ""),
+    "Усть-Лабинские ЭС": os.getenv("UST_LAB_ES_URL", ""),
+    "Тимашевские ЭС":    os.getenv("TIMASHEV_ES_URL", ""),
+    "Тихорецкие ЭС":     os.getenv("TIKHORETS_ES_URL", ""),
+    "Сочинские ЭС":      os.getenv("SOCH_ES_URL", ""),
+    "Славянские ЭС":     os.getenv("SLAV_ES_URL", ""),
+    "Ленинградские ЭС":  os.getenv("LENINGRAD_ES_URL", ""),
+    "Лабинские ЭС":      os.getenv("LABIN_ES_URL", ""),
+    "Краснодарские ЭС":  os.getenv("KRASN_ES_URL", ""),
+    "Армавирские ЭС":    os.getenv("ARMAVIR_ES_URL", ""),
+    "Адыгейские ЭС":     os.getenv("ADYGEA_ES_URL", ""),
+}
+
+# Список всех филиалов для кнопок
+BRANCHES = list(BRANCH_URLS.keys())
 
 # === SETUP ===
 app = Flask(__name__)
@@ -67,35 +55,38 @@ def normalize_sheet_url(url: str) -> str:
         return f'https://drive.google.com/uc?export=download&id={fid}'
     return url
 
-def load_zones() -> (dict, dict):
+def load_zones():
     url = normalize_sheet_url(ZONES_CSV_URL)
-    resp = requests.get(url, timeout=10)
-    resp.raise_for_status()
-    text = resp.content.decode('utf-8-sig')
+    r = requests.get(url, timeout=10); r.raise_for_status()
+    text = r.content.decode('utf-8-sig')
     df = pd.read_csv(StringIO(text), header=None, skiprows=1)
-    zones_map, names_map = {}, {}
+    zones, names = {}, {}
     for _, row in df.iterrows():
         try:
             uid = int(row[2])
-            zones_map[uid] = str(row[0]).strip()
-            names_map[uid] = str(row[3]).strip()
         except:
             continue
-    return zones_map, names_map
+        zones[uid] = str(row[0]).strip()   # Филиал или "All"
+        names[uid] = str(row[3]).strip()   # ФИО
+    return zones, names
 
 # === KEYBOARDS ===
-def main_menu_keyboard(filial: str = None):
-    # для всех — кнопка «Поиск», для All — «Выбор филиала»
-    label = "Выбор филиала" if filial == "All" else "Поиск"
-    return ReplyKeyboardMarkup([[label]], resize_keyboard=True)
+def main_menu_keyboard(is_all=False):
+    return ReplyKeyboardMarkup(
+        [["Выбор филиала" if is_all else "Поиск"]],
+        resize_keyboard=True
+    )
 
 def branches_keyboard():
     keys = [[b] for b in BRANCHES]
-    keys.append(['Назад'])
+    keys.append(["Назад"])
     return ReplyKeyboardMarkup(keys, resize_keyboard=True)
 
 def search_tp_keyboard():
-    return ReplyKeyboardMarkup([['Поиск по ТП'], ['Назад']], resize_keyboard=True)
+    return ReplyKeyboardMarkup([["Поиск по ТП"], ["Назад"]], resize_keyboard=True)
+
+def back_keyboard():
+    return ReplyKeyboardMarkup([["Назад"]], resize_keyboard=True)
 
 # === HANDLERS ===
 def start(update: Update, context: CallbackContext):
@@ -103,57 +94,111 @@ def start(update: Update, context: CallbackContext):
     try:
         zones, names = load_zones()
     except Exception as e:
-        update.message.reply_text(f"Ошибка загрузки прав доступа: {e}")
-        return
-
+        return update.message.reply_text(f"Ошибка загрузки прав доступа: {e}")
     filial = zones.get(user_id)
     name = names.get(user_id)
-    if name:
-        greeting = f'Приветствую Вас, {name}!'
-    else:
-        greeting = 'Добро пожаловать!'
-
+    greet = f"Приветствую Вас, {name}!" if name else "Добро пожаловать!"
     update.message.reply_text(
-        f"{greeting} Нажмите «{'Выбор филиала' if filial=='All' else 'Поиск'}».",
-        reply_markup=main_menu_keyboard(filial)
+        f"{greet} Нажмите «{'Выбор филиала' if filial=='All' else 'Поиск'}».",
+        reply_markup=main_menu_keyboard(filial=='All')
     )
+    # Сброс состояния
+    context.user_data.clear()
 
-def handle_search_or_choose(update: Update, context: CallbackContext):
-    text = update.message.text
+def handle_text(update: Update, context: CallbackContext):
+    text = update.message.text.strip()
     user_id = update.message.from_user.id
     zones, _ = load_zones()
     filial = zones.get(user_id)
 
-    # если All и нажали «Выбор филиала»
-    if filial == 'All' and text == 'Выбор филиала':
-        update.message.reply_text("Выберите филиал:", reply_markup=branches_keyboard())
-        return
+    # Назад
+    if text == "Назад":
+        # если были в режиме ожидания ТП — вернуться в меню поиска внутри филиала
+        if context.user_data.get('await_tp'):
+            context.user_data.pop('await_tp')
+            return update.message.reply_text(
+                f"Филиал «{context.user_data['branch']}».",
+                reply_markup=search_tp_keyboard()
+            )
+        # если выбрали филиал и не вводили ТП — вернуться в выбор филиала или главное
+        if context.user_data.get('branch'):
+            context.user_data.pop('branch')
+            return update.message.reply_text(
+                "Выберите действие:",
+                reply_markup=main_menu_keyboard(filial=='All')
+            )
+        # иначе старт
+        return start(update, context)
 
-    # для обычных пользователей «Поиск»
-    if filial != 'All' and text == 'Поиск':
-        update.message.reply_text(f"Поиск будет выполняться для филиала {filial}.",
-                                  reply_markup=search_tp_keyboard())
-        return
+    # Для All — выбор филиала
+    if filial == "All" and text == "Выбор филиала":
+        return update.message.reply_text("Выберите филиал:", reply_markup=branches_keyboard())
 
-    # выбор филиала из списка
+    # Пользователь без All — сразу поиск внутри своего филиала
+    if filial != "All" and text == "Поиск":
+        context.user_data['branch'] = filial
+        context.user_data['await_tp'] = True
+        return update.message.reply_text(
+            f"Выбран филиал {filial}. Введите номер ТП:",
+            reply_markup=back_keyboard()
+        )
+
+    # Выбор филиала из списка All
     if text in BRANCHES:
         context.user_data['branch'] = text
-        update.message.reply_text(f"Выбран филиал «{text}». Что дальше?",
-                                  reply_markup=search_tp_keyboard())
-        return
+        context.user_data['await_tp'] = True
+        return update.message.reply_text(
+            f"Выбран филиал {text}. Введите номер ТП:",
+            reply_markup=back_keyboard()
+        )
 
-    # «Поиск по ТП»
-    if text == 'Поиск по ТП':
-        branch = context.user_data.get('branch')
-        update.message.reply_text(f"Введите номер ТП для филиала «{branch}»:",
-                                  reply_markup=ReplyKeyboardMarkup([['Назад']], resize_keyboard=True))
-        return
+    # Поиск по ТП (кнопка после выбора филиала)
+    if text == "Поиск по ТП" and context.user_data.get('branch'):
+        context.user_data['await_tp'] = True
+        return update.message.reply_text(
+            f"Введите номер ТП для филиала {context.user_data['branch']}:",
+            reply_markup=back_keyboard()
+        )
 
-    # «Назад»
-    if text == 'Назад':
-        start(update, context)
-        return
+    # Обработка ввода номера ТП
+    if context.user_data.get('await_tp') and context.user_data.get('branch'):
+        branch = context.user_data['branch']
+        sheet_url = BRANCH_URLS.get(branch)
+        if not sheet_url:
+            return update.message.reply_text("Не задана таблица для этого филиала.")
+        # загрузить CSV
+        try:
+            csv_url = normalize_sheet_url(sheet_url)
+            r = requests.get(csv_url, timeout=10); r.raise_for_status()
+            df = pd.read_csv(StringIO(r.content.decode('utf-8-sig')))
+        except Exception as e:
+            return update.message.reply_text(f"Ошибка загрузки таблицы {branch}: {e}")
 
+        # искать по «Наименование ТП»
+        tp_input = text.upper().replace("ТП-", "").strip()
+        df['D_UP'] = df['Наименование ТП'].str.upper().str.replace("ТП-", "")
+        found = df[df['D_UP'].str.contains(tp_input, na=False)]
+
+        if found.empty:
+            resp = "Совпадений не найдено."
+        else:
+            lines = []
+            for _, row in found.iterrows():
+                lines.append(
+                    f"{row['РЭС']} — ТП {row['Наименование ТП']}, "
+                    f"ВЛ: {row['Наименование ВЛ']}, Опоры: {row['Опоры']}, "
+                    f"Кол-во опор: {row['Количество опор']}, Провайдер: {row['Наименование Провайдера']}"
+                )
+            resp = f"Найдено {len(lines)}:\n" + "\n".join(lines)
+
+        # отправить ответ и вернуться в меню поиска по ТП
+        context.user_data.pop('await_tp')
+        return update.message.reply_text(resp, reply_markup=search_tp_keyboard())
+
+    # Любой другой ввод — ничего не понимаем
+    return update.message.reply_text("Нажмите одну из кнопок меню.", reply_markup=main_menu_keyboard(filial=='All'))
+
+# === SELF-PING ===
 def ping_self():
     if not SELF_URL:
         return
@@ -164,9 +209,9 @@ def ping_self():
             pass
         time.sleep(300)
 
-# === REGISTER HANDLERS ===
+# === РЕГИСТРАЦИЯ ===
 dispatcher.add_handler(CommandHandler('start', start))
-dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_search_or_choose))
+dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_text))
 
 # === WEBHOOK ===
 @app.route('/webhook', methods=['POST'])
@@ -175,7 +220,7 @@ def webhook():
     dispatcher.process_update(upd)
     return jsonify({'status': 'ok'})
 
-# === MAIN ===
+# === START ===
 if __name__ == '__main__':
     threading.Thread(target=ping_self, daemon=True).start()
     app.run(host='0.0.0.0', port=int(os.getenv('PORT', 5000)))
