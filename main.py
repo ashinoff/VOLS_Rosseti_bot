@@ -10,11 +10,26 @@ from telegram import Bot, Update, ReplyKeyboardMarkup
 from telegram.ext import Dispatcher, CommandHandler, MessageHandler, Filters, CallbackContext
 
 # === ENVIRONMENT VARIABLES ===
+# TOKEN                  — ваш Telegram Bot Token
+# SELF_URL               — URL этого сервиса (для self-ping)
+# ZONES_CSV_URL          — ссылка на CSV-таблицу зон доступа
+# ИД каждой филиальной таблицы (любые названия ENV, главное потом в коде ими пользоваться):
+# YUGO_ZAPAD_ES_URL      
+# UST_LAB_ES_URL         
+# TIMASHEV_ES_URL        
+# TIKHORETS_ES_URL       
+# SOCH_ES_URL            
+# SLAV_ES_URL            
+# LENINGRAD_ES_URL       
+# LABIN_ES_URL           
+# KRASN_ES_URL           
+# ARMAVIR_ES_URL         
+# ADYGEA_ES_URL          
 TOKEN = os.getenv("TOKEN")
 SELF_URL = os.getenv("SELF_URL", "").rstrip('/')
 ZONES_CSV_URL = os.getenv("ZONES_CSV_URL", "").strip()
 
-# === BRANCH BUTTONS ===
+# === BRANCHES ===
 BRANCHES = [
     "Краснодарские ЭС",
     "Сочинские ЭС",
@@ -26,6 +41,7 @@ BRANCHES = [
     "Тимашевские ЭС",
     "Славянские ЭС",
     "Лабинские ЭС",
+    "Ленинградские ЭС",
 ]
 
 # === SETUP ===
@@ -55,28 +71,31 @@ def load_zones() -> (dict, dict):
     url = normalize_sheet_url(ZONES_CSV_URL)
     resp = requests.get(url, timeout=10)
     resp.raise_for_status()
-    text = resp.content.decode('utf-8-sig')  # принудительно в UTF-8, отрезая BOM
+    text = resp.content.decode('utf-8-sig')
     df = pd.read_csv(StringIO(text), header=None, skiprows=1)
-    if df.shape[1] < 4:
-        raise ValueError(f"В таблице должно быть минимум 4 колонки, найдено {df.shape[1]}")
     zones_map, names_map = {}, {}
     for _, row in df.iterrows():
         try:
             uid = int(row[2])
+            zones_map[uid] = str(row[0]).strip()
+            names_map[uid] = str(row[3]).strip()
         except:
             continue
-        zones_map[uid] = str(row[0]).strip()
-        names_map[uid] = str(row[3]).strip()
     return zones_map, names_map
 
 # === KEYBOARDS ===
-def main_menu_keyboard():
-    return ReplyKeyboardMarkup([['Поиск']], resize_keyboard=True)
+def main_menu_keyboard(filial: str = None):
+    # для всех — кнопка «Поиск», для All — «Выбор филиала»
+    label = "Выбор филиала" if filial == "All" else "Поиск"
+    return ReplyKeyboardMarkup([[label]], resize_keyboard=True)
 
 def branches_keyboard():
     keys = [[b] for b in BRANCHES]
     keys.append(['Назад'])
     return ReplyKeyboardMarkup(keys, resize_keyboard=True)
+
+def search_tp_keyboard():
+    return ReplyKeyboardMarkup([['Поиск по ТП'], ['Назад']], resize_keyboard=True)
 
 # === HANDLERS ===
 def start(update: Update, context: CallbackContext):
@@ -87,30 +106,54 @@ def start(update: Update, context: CallbackContext):
         update.message.reply_text(f"Ошибка загрузки прав доступа: {e}")
         return
 
+    filial = zones.get(user_id)
     name = names.get(user_id)
     if name:
-        greeting = f'Приветствую Вас, "{name}"! Нажмите «Поиск» для выбора филиала.'
+        greeting = f'Приветствую Вас, {name}!'
     else:
-        greeting = 'Добро пожаловать! Нажмите «Поиск» для выбора филиала.'
-    update.message.reply_text(greeting, reply_markup=main_menu_keyboard())
+        greeting = 'Добро пожаловать!'
 
-def handle_search(update: Update, context: CallbackContext):
+    update.message.reply_text(
+        f"{greeting} Нажмите «{'Выбор филиала' if filial=='All' else 'Поиск'}».",
+        reply_markup=main_menu_keyboard(filial)
+    )
+
+def handle_search_or_choose(update: Update, context: CallbackContext):
+    text = update.message.text
     user_id = update.message.from_user.id
-    try:
-        zones, _ = load_zones()
-    except Exception as e:
-        update.message.reply_text(f"Ошибка загрузки прав доступа: {e}")
+    zones, _ = load_zones()
+    filial = zones.get(user_id)
+
+    # если All и нажали «Выбор филиала»
+    if filial == 'All' and text == 'Выбор филиала':
+        update.message.reply_text("Выберите филиал:", reply_markup=branches_keyboard())
         return
 
-    filial = zones.get(user_id)
-    if filial == 'All':
-        update.message.reply_text("Выберите филиал:", reply_markup=branches_keyboard())
-    elif filial in BRANCHES:
-        update.message.reply_text(f"Поиск будет выполняться для филиала {filial}.")
-    else:
-        update.message.reply_text("У вас нет прав доступа.")
+    # для обычных пользователей «Поиск»
+    if filial != 'All' and text == 'Поиск':
+        update.message.reply_text(f"Поиск будет выполняться для филиала {filial}.",
+                                  reply_markup=search_tp_keyboard())
+        return
 
-# === SELF-PING ===
+    # выбор филиала из списка
+    if text in BRANCHES:
+        context.user_data['branch'] = text
+        update.message.reply_text(f"Выбран филиал «{text}». Что дальше?",
+                                  reply_markup=search_tp_keyboard())
+        return
+
+    # «Поиск по ТП»
+    if text == 'Поиск по ТП':
+        branch = context.user_data.get('branch')
+        update.message.reply_text(f"Введите номер ТП для филиала «{branch}»:",
+                                  reply_markup=ReplyKeyboardMarkup([['Назад']], resize_keyboard=True))
+        return
+
+    # «Назад»
+    if text == 'Назад':
+        start(update, context)
+        return
+
 def ping_self():
     if not SELF_URL:
         return
@@ -121,9 +164,9 @@ def ping_self():
             pass
         time.sleep(300)
 
-# === REGISTER ===
+# === REGISTER HANDLERS ===
 dispatcher.add_handler(CommandHandler('start', start))
-dispatcher.add_handler(MessageHandler(Filters.regex('^Поиск$'), handle_search))
+dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_search_or_choose))
 
 # === WEBHOOK ===
 @app.route('/webhook', methods=['POST'])
