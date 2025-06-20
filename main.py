@@ -1,3 +1,4 @@
+```python
 import os
 import threading
 import time
@@ -64,8 +65,8 @@ def load_zones():
             uid = int(row[2])
         except:
             continue
-        zones[uid] = str(row[0]).strip()   # Филиал или "All"
-        names[uid] = str(row[3]).strip()   # ФИО
+        zones[uid] = str(row[0]).strip()
+        names[uid] = str(row[3]).strip()
     return zones, names
 
 # === KEYBOARDS ===
@@ -77,14 +78,11 @@ def main_menu_keyboard(is_all=False):
 
 def branches_keyboard():
     keys = [[b] for b in BRANCHES]
-    keys.append(["Назад"])
+    keys.append(["Выбор филиала"])
     return ReplyKeyboardMarkup(keys, resize_keyboard=True)
 
-def search_tp_keyboard():
-    return ReplyKeyboardMarkup([["Поиск по ТП"], ["Назад"]], resize_keyboard=True)
-
-def back_keyboard():
-    return ReplyKeyboardMarkup([["Назад"]], resize_keyboard=True)
+def branch_choice_keyboard():
+    return ReplyKeyboardMarkup([["Выбор филиала"]], resize_keyboard=True)
 
 # === HANDLERS ===
 def start(update: Update, context: CallbackContext):
@@ -105,54 +103,30 @@ def start(update: Update, context: CallbackContext):
 def handle_text(update: Update, context: CallbackContext):
     text    = update.message.text.strip()
     user_id = update.message.from_user.id
-    zones, _ = load_zones()
-    filial   = zones.get(user_id)
+    zones, names = load_zones()
+    filial = zones.get(user_id)
+    name   = names.get(user_id)
 
-    # Назад
-    if text == "Назад":
-        if context.user_data.get('await_tp'):
-            context.user_data.pop('await_tp')
-            br = context.user_data['branch']
-            return update.message.reply_text(
-                f"Филиал «{br}».",
-                reply_markup=search_tp_keyboard()
-            )
-        if context.user_data.get('branch'):
-            context.user_data.pop('branch')
-            return update.message.reply_text(
-                "Выберите действие:",
-                reply_markup=main_menu_keyboard(filial=='All')
-            )
-        return start(update, context)
-
-    # All — выбор филиала
+    # Выбрать филиал
     if filial == "All" and text == "Выбор филиала":
         return update.message.reply_text("Выберите филиал:", reply_markup=branches_keyboard())
 
-    # Пользователь без All — сразу поиск
-    if filial != "All" and text == "Поиск":
-        context.user_data['branch']  = filial
-        context.user_data['await_tp'] = True
-        return update.message.reply_text(
-            f"Выбран филиал {filial}. Введите номер ТП:",
-            reply_markup=back_keyboard()
-        )
-
-    # Выбор филиала из списка All
+    # Переключиться на новый филиал
     if text in BRANCHES:
         context.user_data['branch']  = text
         context.user_data['await_tp'] = True
         return update.message.reply_text(
             f"Выбран филиал {text}. Введите номер ТП:",
-            reply_markup=back_keyboard()
+            reply_markup=branch_choice_keyboard()
         )
 
-    # Кнопка «Поиск по ТП»
-    if text == "Поиск по ТП" and context.user_data.get('branch'):
+    # Пользователь без All — сразу ввести ТП
+    if filial != "All" and text == "Поиск":
+        context.user_data['branch']  = filial
         context.user_data['await_tp'] = True
         return update.message.reply_text(
-            f"Введите номер ТП для филиала {context.user_data['branch']}:",
-            reply_markup=back_keyboard()
+            f"Выбран филиал {filial}. Введите номер ТП:",
+            reply_markup=branch_choice_keyboard()
         )
 
     # Обработка ввода ТП
@@ -178,33 +152,29 @@ def handle_text(update: Update, context: CallbackContext):
             tp_name  = found.iloc[0]['Наименование ТП']
             res_name = found.iloc[0]['РЭС']
             count    = len(found)
-
-            lines = []
-            lines.append(f"Найдено {count} ВОЛС с договором аренды:")
-            lines.append(f"{tp_name} находится в {res_name} РЭС")
-            lines.append("")  # пустая строка перед деталями
-
+            lines = [
+                f"Найдено {count} ВОЛС с договором аренды:",
+                f"{tp_name} находится в {res_name} РЭС",
+                ""
+            ]
             for _, row in found.iterrows():
                 lines.append(
                     f"ВЛ {row['Наименование ВЛ']}: Опоры: **{row['Опоры']}**, "
                     f"Кол-во опор: {row['Количество опор']}, Провайдер: {row['Наименование Провайдера']}"
                 )
-                lines.append("")  # разделитель между записями
+                lines.append("")  # разделитель
 
             resp = "\n".join(lines).strip()
 
-        context.user_data.pop('await_tp')
+        # После выдачи оставляем await_tp=True, чтобы сразу ввести новый TP
         return update.message.reply_text(
-            resp,
-            reply_markup=search_tp_keyboard(),
+            f"{resp}\n\n{name}, введите номер ТП или выберите Филиал ЭС",
+            reply_markup=branch_choice_keyboard(),
             parse_mode='Markdown'
         )
 
-    # Любой другой ввод
-    return update.message.reply_text(
-        "Нажмите одну из кнопок меню.",
-        reply_markup=main_menu_keyboard(filial=='All')
-    )
+    # Любой другой ввод — начать сначала
+    return start(update, context)
 
 # === SELF-PING ===
 def ping_self():
@@ -232,3 +202,4 @@ def webhook():
 if __name__ == '__main__':
     threading.Thread(target=ping_self, daemon=True).start()
     app.run(host='0.0.0.0', port=int(os.getenv('PORT', 5000)))
+```
