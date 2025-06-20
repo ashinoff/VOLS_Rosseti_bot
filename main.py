@@ -28,7 +28,6 @@ BRANCH_URLS = {
     "Армавирские ЭС":    os.getenv("ARMAVIR_ES_URL", ""),
     "Адыгейские ЭС":     os.getenv("ADYGEA_ES_URL", ""),
 }
-
 BRANCHES = list(BRANCH_URLS.keys())
 
 # === SETUP ===
@@ -82,9 +81,8 @@ def branches_keyboard():
     keys.append(["Назад"])
     return ReplyKeyboardMarkup(keys, resize_keyboard=True)
 
-def branch_keyboard(branch_name: str):
-    # После поиска – одна кнопка с именем филиала
-    return ReplyKeyboardMarkup([[branch_name]], resize_keyboard=True)
+def choose_branch_keyboard():
+    return ReplyKeyboardMarkup([["Выбор филиала"]], resize_keyboard=True)
 
 # === HANDLERS ===
 def start(update: Update, context: CallbackContext):
@@ -125,34 +123,33 @@ def handle_text(update: Update, context: CallbackContext):
     user_res    = res_zones[user_id]
     name        = names[user_id]
 
-    # Нажали кнопку с названием филиала
-    if context.user_data.get('branch') and text == context.user_data['branch']:
-        return update.message.reply_text(
-            f"{name}, вы можете просматривать только филиал {user_branch}.",
-            reply_markup=branch_keyboard(user_branch)
-        )
+    # Нажали «Выбор филиала»
+    if text == "Выбор филиала":
+        if user_branch == "All":
+            return update.message.reply_text("Выберите филиал:", reply_markup=branches_keyboard())
+        else:
+            return update.message.reply_text(
+                f"{name}, вы можете просматривать только филиал {user_branch}.",
+                reply_markup=choose_branch_keyboard()
+            )
 
-    # Назад → главное
+    # Назад → старт
     if text == "Назад":
         return start(update, context)
 
     # All + выбор филиала
-    if user_branch == "All" and text == "Выбор филиала":
-        return update.message.reply_text("Выберите филиал:", reply_markup=branches_keyboard())
-
-    # Пользователь с конкретным филиалом сразу к вводу ТП
-    if user_branch != "All" and text == "Поиск":
-        context.user_data['branch'] = user_branch
-        context.user_data['res']    = user_res
-        context.user_data['await']  = True
-        return update.message.reply_text("Введите номер ТП:", reply_markup=branch_keyboard(user_branch))
-
-    # Выбор филиала из списка
     if user_branch == "All" and text in BRANCHES:
         context.user_data['branch'] = text
         context.user_data['res']    = "All"
         context.user_data['await']  = True
-        return update.message.reply_text("Введите номер ТП:", reply_markup=branch_keyboard(text))
+        return update.message.reply_text("Введите номер ТП:", reply_markup=choose_branch_keyboard())
+
+    # Конкретный филиал — сразу в режим ТП
+    if user_branch != "All" and text == "Поиск":
+        context.user_data['branch'] = user_branch
+        context.user_data['res']    = user_res
+        context.user_data['await']  = True
+        return update.message.reply_text("Введите номер ТП:", reply_markup=choose_branch_keyboard())
 
     # Обработка ввода ТП
     if context.user_data.get('await') and context.user_data.get('branch'):
@@ -173,18 +170,18 @@ def handle_text(update: Update, context: CallbackContext):
         df['D_UP'] = df['Наименование ТП'].str.upper().str.replace("ТП-", "")
         found_all = df[df['D_UP'].str.contains(tp_input, na=False)]
 
-        # Ограничение по РЭС
+        # фильтр по РЭС
         if not found_all.empty and res_perm != "All":
             found = found_all[found_all['РЭС'] == res_perm]
             if found.empty:
                 return update.message.reply_text(
                     f"{name}, к сожалению, у вас нет прав просмотра данной ТП.",
-                    reply_markup=branch_keyboard(branch)
+                    reply_markup=choose_branch_keyboard()
                 )
         else:
             found = found_all
 
-        # Формируем ответ
+        # результат
         if found.empty:
             resp = "Договоров ВОЛС на данной ТП нет, либо название ТП введено некорректно."
         else:
@@ -193,25 +190,25 @@ def handle_text(update: Update, context: CallbackContext):
             tp_name  = found.iloc[0]['Наименование ТП']
             lines = [
                 f"Найдено {count} ВОЛС с договором аренды:",
-                f"{tp_name} находится в {res_name}"
+                f"{tp_name} находится в {res_name}",
             ]
             for _, row in found.iterrows():
-                lines.append("")  # пустая строка-разделитель
+                lines.append("")  # разделитель
                 lines.append(f"ВЛ {row['Наименование ВЛ']}: Опоры: {row['Опоры']}")
                 lines.append(f"Кол-во опор: {row['Количество опор']}")
                 lines.append(f"Провайдер: {row['Наименование Провайдера']}")
             resp = "\n".join(lines)
 
-        # сбрасываем ожидание
         context.user_data.pop('await')
-        # вывод результата и сразу предлагаем ввести новую ТП или нажать филиал
-        update.message.reply_text(resp, reply_markup=branch_keyboard(branch))
+        # 1) отправляем результат
+        update.message.reply_text(resp, reply_markup=choose_branch_keyboard())
+        # 2) и сразу просим ввести новую ТП
         return update.message.reply_text(
-            f"{name}, введите номер ТП или нажмите «{branch}» для смены филиала.",
-            reply_markup=branch_keyboard(branch)
+            f"{name}, введите номер ТП.",
+            reply_markup=choose_branch_keyboard()
         )
 
-    # Всё остальное
+    # всё остальное
     return update.message.reply_text(
         "Нажмите одну из кнопок меню.",
         reply_markup=main_menu_keyboard(user_branch=='All')
@@ -228,7 +225,7 @@ def ping_self():
             pass
         time.sleep(300)
 
-# === РЕГИСТРАЦИЯ ===
+# === REGISTRATION ===
 dispatcher.add_handler(CommandHandler('start', start))
 dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_text))
 
