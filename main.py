@@ -1,42 +1,50 @@
 import os
+import threading
+import time
 import re
-from io import StringIO
-
-import pandas as pd
 import requests
-from flask import Flask, request
-from telegram import Bot, Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
+import pandas as pd
+from flask import Flask, request, jsonify
+from telegram import Bot, Update, ReplyKeyboardMarkup
 from telegram.ext import Dispatcher, CommandHandler, MessageHandler, Filters, CallbackContext
 
-app = Flask(__name__)
-
-# === ENV ===
-TOKEN         = os.getenv("TOKEN")
-SELF_URL      = os.getenv("SELF_URL")
-# ensure no trailing whitespace or newlines
+# === ENVIRONMENT VARIABLES ===
+# TOKEN       - Telegram Bot Token
+# SELF_URL    - URL of this service (for self-ping)
+# ZONES_CSV_URL - Google Sheets CSV export URL with zones data
+TOKEN = os.getenv("TOKEN")
+SELF_URL = os.getenv("SELF_URL", "").rstrip('/')
 ZONES_CSV_URL = os.getenv("ZONES_CSV_URL", "").strip()
-# format: "Branch1=GID1,Branch2=GID2,..."
-BRANCH_SHEETS_MAP = {
-    k.strip(): int(v.strip())
-    for k, v in (
-        p.split("=", 1) for p in os.getenv("BRANCH_SHEETS_MAP", "").split(",") if "=" in p
-    )
-}
 
-bot        = Bot(token=TOKEN)
+# === HARD-CODED BRANCH BUTTONS ===
+BRANCHES = [
+    "Краснодарские ЭС",
+    "Сочинские ЭС",
+    "Юго-Западные ЭС",
+    "Адыгейские ЭС",
+    "Тихорецкие ЭС",
+    "Армавирские ЭС",
+    "Усть-Лабинские ЭС",
+    "Тимашевские ЭС",
+    "Славянские ЭС",
+    "Лабинские ЭС",
+]
+
+# === FLASK & TELEGRAM SETUP ===
+app = Flask(__name__)
+bot = Bot(token=TOKEN)
 dispatcher = Dispatcher(bot, None, use_context=True)
-user_states = {}   # user_id -> state
-user_data   = {}   # user-specific data like chosen branch
 
-# --- Utilities ---
-def normalize_sheet_url(url: str, default_gid: int = 0) -> str:
-    url = url.strip()
+# === HELPER FUNCTIONS ===
+
+def normalize_sheet_url(url: str) -> str:
+    # Convert Google Sheets/Drive link to direct CSV download
     if '/export' in url or url.endswith('.csv'):
         return url
     m = re.search(r'/d/([\w-]+)', url)
     if m:
         sid = m.group(1)
-        return f'https://docs.google.com/spreadsheets/d/{sid}/export?format=csv&gid={default_gid}'
+        return f'https://docs.google.com/spreadsheets/d/{sid}/export?format=csv&gid=0'
     m2 = re.search(r'/file/d/([\w-]+)', url)
     if m2:
         fid = m2.group(1)
@@ -45,107 +53,74 @@ def normalize_sheet_url(url: str, default_gid: int = 0) -> str:
 
 
 def load_zones() -> dict:
+    # Load zones CSV into dict: {user_id: filial}
     url = normalize_sheet_url(ZONES_CSV_URL)
     resp = requests.get(url, timeout=10)
     resp.raise_for_status()
-    df = pd.read_csv(StringIO(resp.text), dtype=str)
+    df = pd.read_csv(pd.compat.StringIO(resp.text))
     df.columns = df.columns.str.strip().str.upper()
-    required = {"ФИЛИАЛ", "РЭС", "ID", "ФИО"}
-    missing = required - set(df.columns)
-    if missing:
-        raise ValueError(f"В файле зон не все колонки: {missing}")
-    zones = {}
-    for _, row in df.iterrows():
-        uid = row["ID"].strip()
-        zones[uid] = {
-            "filial": row["ФИЛИАЛ"].strip(),
-            "res":    row["РЭС"].strip(),
-            "name":   row["ФИО"].strip(),
-        }
-    return zones
+    required = {'ФИЛИАЛ', 'РЭС', 'ID', 'ФИО'}
+    if not required.issubset(df.columns):
+        raise ValueError(f"Missing columns in zones file: {required - set(df.columns)}")
+    return {int(row['ID']): row['ФИЛИАЛ'] for _, row in df.iterrows()}
 
-# --- Keyboards ---
-def main_menu():
-    return ReplyKeyboardMarkup(
-        [["Поиск"], ["Справочная информация"], ["Уведомление всем"]],
-        resize_keyboard=True
-    )
+# === KEYBOARDS ===
+def main_menu_keyboard():
+    return ReplyKeyboardMarkup([['Поиск']], resize_keyboard=True)
 
 def branches_keyboard():
-    buttons = [[b] for b in BRANCH_SHEETS_MAP]
-    buttons.append(["Назад"])
-    return ReplyKeyboardMarkup(buttons, resize_keyboard=True)
+    keys = [[b] for b in BRANCHES]
+    keys.append(['Назад'])
+    return ReplyKeyboardMarkup(keys, resize_keyboard=True)
 
-# --- Handlers ---
+# === HANDLERS ===
 
 def start(update: Update, context: CallbackContext):
-    uid = str(update.message.from_user.id)
-    name = load_zones().get(uid, {}).get('name', 'пользователь')
-    update.message.reply_text(f"Здравствуйте, {name}!", reply_markup=main_menu())
-    user_states.pop(uid, None)
-    user_data.pop(uid, None)
+    update.message.reply_text(
+        "Добро пожаловать! Нажмите 'Поиск' для выбора филиала.",
+        reply_markup=main_menu_keyboard()
+    )
 
-
-def search(update: Update, context: CallbackContext):
-    uid = str(update.message.from_user.id)
+def handle_search(update: Update, context: CallbackContext):
+    # Determine user zone and show branches if 'All'
+    user_id = update.message.from_user.id
     zones = load_zones()
-    user = zones.get(uid)
-    if not user:
-        update.message.reply_text("У вас нет прав доступа.", reply_markup=main_menu())
-        return
-    if user['filial'].lower() == 'all':
-        update.message.reply_text("Выберите филиал:", reply_markup=branches_keyboard())
-        user_states[uid] = 'CHOOSE_BRANCH'
-    else:
-        user_data[uid] = {'filial': user['filial'], 'gid': BRANCH_SHEETS_MAP.get(user['filial'], 0)}
+    filial = zones.get(user_id)
+    if filial == 'All':
         update.message.reply_text(
-            f"Введите номер ТП для филиала {user['filial']}:",
-            reply_markup=ReplyKeyboardMarkup([["Назад"]], resize_keyboard=True)
+            "Выберите филиал:", reply_markup=branches_keyboard()
         )
-        user_states[uid] = 'ENTER_TP'
-
-
-def text_handler(update: Update, context: CallbackContext):
-    uid = str(update.message.from_user.id)
-    state = user_states.get(uid)
-    text = update.message.text.strip()
-
-    if state == 'CHOOSE_BRANCH':
-        if text == 'Назад':
-            start(update, context)
-            return
-        if text in BRANCH_SHEETS_MAP:
-            user_data[uid] = {'filial': text, 'gid': BRANCH_SHEETS_MAP[text]}
-            update.message.reply_text(
-                f"Введите номер ТП для филиала {text}:",
-                reply_markup=ReplyKeyboardMarkup([["Назад"]], resize_keyboard=True)
-            )
-            user_states[uid] = 'ENTER_TP'
-        else:
-            update.message.reply_text("Неверный выбор, выберите филиал.", reply_markup=branches_keyboard())
-    elif state == 'ENTER_TP':
-        if text == 'Назад':
-            search(update, context)
-            return
-        # дальше логика поиска по введенному TP: загрузить файл филиала по gid и искать
-        # ... ваш код тут ...
-        update.message.reply_text("Результаты поиска ТП (здесь ваш результат)", reply_markup=main_menu())
-        user_states.pop(uid, None)
-        user_data.pop(uid, None)
+    elif filial in BRANCHES:
+        update.message.reply_text(
+            f"Поиск будет выполняться для филиала {filial}."
+        )
     else:
-        update.message.reply_text("Пожалуйста, воспользуйтесь меню.", reply_markup=main_menu())
+        update.message.reply_text("У вас нет прав доступа.")
 
-# регистрация хендлеров
-dispatcher.add_handler(CommandHandler("start", start))
-dispatcher.add_handler(MessageHandler(Filters.regex('^Поиск$'), search))
-dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, text_handler))
+# === SELF-PING TO KEEP ALIVE ===
+def ping_self():
+    if not SELF_URL:
+        return
+    while True:
+        try:
+            requests.get(SELF_URL + '/webhook')
+        except:
+            pass
+        time.sleep(300)
 
-# --- Webhook ---
+# Register handlers
+
+dispatcher.add_handler(CommandHandler('start', start))
+dispatcher.add_handler(MessageHandler(Filters.regex('^Поиск$'), handle_search))
+
+# === WEBHOOK ===
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    upd = Update.de_json(request.get_json(force=True), bot)
-    dispatcher.process_update(upd)
-    return 'OK'
+    update = Update.de_json(request.get_json(force=True), bot)
+    dispatcher.process_update(update)
+    return jsonify({'status': 'ok'})
 
+# === RUN ===
 if __name__ == '__main__':
+    threading.Thread(target=ping_self, daemon=True).start()
     app.run(host='0.0.0.0', port=int(os.getenv('PORT', 5000)))
