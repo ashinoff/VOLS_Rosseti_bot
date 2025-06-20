@@ -11,185 +11,147 @@ from telegram.ext import Dispatcher, CommandHandler, MessageHandler, Filters, Ca
 # === ENVIRONMENT VARIABLES ===
 # TOKEN           - Telegram Bot Token
 # SELF_URL        - URL of this service (for self-ping)
-# ZONES_CSV_URL   - Google Sheets CSV export URL с вашими зонами
-TOKEN = os.getenv("TOKEN")
-SELF_URL = os.getenv("SELF_URL", "").rstrip('/')
+# ZONES_CSV_URL   - Google Sheets CSV export URL with zones data
+TOKEN         = os.getenv("TOKEN")
+SELF_URL      = os.getenv("SELF_URL", "").rstrip("/")
 ZONES_CSV_URL = os.getenv("ZONES_CSV_URL", "").strip()
 
-# === ЖЁСТКО ЗАПИСАННЫЕ КНОПКИ ===
+# === HARD-CODED BRANCH BUTTONS ===
 BRANCHES = [
     "Краснодарские ЭС",
     "Сочинские ЭС",
     "Юго-Западные ЭС",
     "Адыгейские ЭС",
+    "Тихорецкие ЭС",
     "Армавирские ЭС",
+    "Усть-Лабинские ЭС",
+    "Тимашевские ЭС",
+    "Славянские ЭС",
     "Лабинские ЭС",
     "Ленинградские ЭС",
-    "Славянские ЭС",
-    "Тимашевские ЭС",
-    "Тихорецкие ЭС",
-    "Усть-Лабинские ЭС",
 ]
 
 # === FLASK & TELEGRAM SETUP ===
-app = Flask(__name__)
-bot = Bot(token=TOKEN)
+app        = Flask(__name__)
+bot        = Bot(token=TOKEN)
 dispatcher = Dispatcher(bot, None, use_context=True)
 
 # === HELPERS ===
 def normalize_sheet_url(url: str) -> str:
-    if '/export' in url or url.endswith('.csv'):
+    """
+    Пропускаем «как есть» любые ссылки, которые уже готовы отдать CSV:
+      - содержат /export
+      - заканчиваются на .csv
+      - содержат output=csv
+    Иначе приводим стандартные Google-URL к CSV-экспорту.
+    """
+    if "/export" in url or url.endswith(".csv") or "output=csv" in url:
         return url
-    m = re.search(r'/d/e/([\w-]+)/', url)
+
+    # Published sheet (public) URLs с /d/e/…/pub
+    m = re.search(r"/d/e/([\w\-]+)/", url)
     if m:
         sid = m.group(1)
-        return f'https://docs.google.com/spreadsheets/d/e/{sid}/export?format=csv&gid=0'
-    m = re.search(r'/d/([\w-]+)', url)
+        return f"https://docs.google.com/spreadsheets/d/e/{sid}/pub?gid=0&single=true&output=csv"
+
+    # Стандартная таблица
+    m = re.search(r"/d/([\w\-]+)", url)
     if m:
         sid = m.group(1)
-        return f'https://docs.google.com/spreadsheets/d/{sid}/export?format=csv&gid=0'
-    m2 = re.search(r'/file/d/([\w-]+)', url)
+        return f"https://docs.google.com/spreadsheets/d/{sid}/export?format=csv&gid=0"
+
+    # Ссылка на файл в Drive
+    m2 = re.search(r"/file/d/([\w\-]+)", url)
     if m2:
         fid = m2.group(1)
-        return f'https://drive.google.com/uc?export=download&id={fid}'
+        return f"https://drive.google.com/uc?export=download&id={fid}"
+
     return url
 
-def load_zones() -> dict:
-    url = normalize_sheet_url(ZONES_CSV_URL)
-    resp = requests.get(url, timeout=10)
-    resp.raise_for_status()
-    df = pd.read_csv(pd.compat.StringIO(resp.text), header=None, skiprows=1,
-                     usecols=[0,1,2,3], names=['filial','res','id','fio'])
-    return {int(row['id']): row for _, row in df.iterrows()}
 
-def load_branch_sheet(branch_name: str) -> pd.DataFrame:
-    url = os.getenv(f"URL_{branch_name.replace(' ', '_')}", "")
-    url = normalize_sheet_url(url)
+def load_zones() -> dict:
+    """
+    Читает CSV по ссылке ZONES_CSV_URL и возвращает
+    словарь user_id -> филиал (строка из колонки 'ФИЛИАЛ').
+    """
+    url  = normalize_sheet_url(ZONES_CSV_URL)
     resp = requests.get(url, timeout=10)
     resp.raise_for_status()
-    # читаем с заголовком первой строки
-    return pd.read_csv(pd.compat.StringIO(resp.text))
+
+    # читаем CSV
+    df = pd.read_csv(pd.compat.StringIO(resp.text))
+    # избавляемся от пробелов в названиях колонок и приводим к верхнему регистру
+    df.columns = df.columns.str.strip().str.upper()
+
+    required = {"ФИЛИАЛ", "РЭС", "ID", "ФИО"}
+    if not required.issubset(df.columns):
+        missing = required - set(df.columns)
+        raise ValueError(f"В файле зон не все колонки присутствуют: {missing}")
+
+    # создаём словарь ID -> ФИЛИАЛ
+    return {int(row["ID"]): row["ФИЛИАЛ"] for _, row in df.iterrows()}
+
 
 # === KEYBOARDS ===
-def main_menu():
-    return ReplyKeyboardMarkup([['Поиск'], ['Справка']], resize_keyboard=True)
+def main_menu_keyboard():
+    return ReplyKeyboardMarkup([["Поиск"]], resize_keyboard=True)
 
-def branches_kb():
+def branches_keyboard():
     keys = [[b] for b in BRANCHES]
-    keys.append(['Назад'])
+    keys.append(["Назад"])
     return ReplyKeyboardMarkup(keys, resize_keyboard=True)
 
-def search_kb():
-    return ReplyKeyboardMarkup([['Поиск по ТП'], ['Назад']], resize_keyboard=True)
 
 # === HANDLERS ===
 def start(update: Update, context: CallbackContext):
     update.message.reply_text(
-        "Приветствую Вас " + load_zones().get(update.message.from_user.id, {}).get('fio', '') ,
-        reply_markup=main_menu()
+        "Добро пожаловать! Нажмите «Поиск» для выбора филиала.",
+        reply_markup=main_menu_keyboard()
     )
 
 def handle_search(update: Update, context: CallbackContext):
-    user = update.message.from_user.id
-    zones = load_zones()
-    info = zones.get(user)
-    if not info:
-        update.message.reply_text("У вас нет прав доступа.")
-        return
-    filial = info['filial']
-    if filial == 'All':
-        update.message.reply_text("Выбор филиала:", reply_markup=branches_kb())
-        context.user_data['state'] = 'choose_branch'
-    elif filial in BRANCHES:
-        context.user_data['branch'] = filial
-        update.message.reply_text(f"Выбран филиал {filial}\nЧто дальше?", reply_markup=search_kb())
-        context.user_data['state'] = 'in_branch'
-    else:
-        update.message.reply_text("У вас нет прав доступа.")
-
-def handle_branch_choice(update: Update, context: CallbackContext):
-    text = update.message.text
-    if text == 'Назад':
-        update.message.reply_text("Поиск отменён.", reply_markup=main_menu())
-        context.user_data.clear()
-    elif text in BRANCHES:
-        context.user_data['branch'] = text
-        update.message.reply_text(f"Выбран филиал {text}\nЧто дальше?", reply_markup=search_kb())
-        context.user_data['state'] = 'in_branch'
-    else:
-        update.message.reply_text("Выберите филиал или Назад.")
-
-def handle_tp_menu(update: Update, context: CallbackContext):
-    text = update.message.text
-    if text == 'Назад':
-        # возвращаемся к меню филиалов
-        update.message.reply_text("Выбор филиала:", reply_markup=branches_kb())
-        context.user_data['state'] = 'choose_branch'
-    elif text == 'Поиск по ТП':
-        update.message.reply_text("Введите номер ТП:", reply_markup=ReplyKeyboardMarkup([['Назад']], resize_keyboard=True))
-        context.user_data['state'] = 'await_tp'
-    else:
-        update.message.reply_text("Нажмите Поиск по ТП или Назад.")
-
-def handle_tp_search(update: Update, context: CallbackContext):
-    tp_input = update.message.text.strip()
-    if tp_input == 'Назад':
-        # обратно к выбору действий в филиале
-        b = context.user_data.get('branch')
-        update.message.reply_text(f"Выбран филиал {b}\nЧто дальше?", reply_markup=search_kb())
-        context.user_data['state'] = 'in_branch'
-        return
-
-    branch = context.user_data.get('branch')
+    user_id = update.message.from_user.id
     try:
-        df = load_branch_sheet(branch)
+        zones = load_zones()
     except Exception as e:
-        update.message.reply_text(f"Ошибка загрузки таблицы {branch}: {e}")
+        update.message.reply_text(f"Ошибка чтения прав доступа: {e}")
         return
 
-    # поиск по колонке D – 'Наименование ТП'
-    mask = df['Наименование ТП'].str.upper().str.contains(tp_input.upper())
-    found = df[mask]
-    cnt = len(found)
-    if cnt == 0:
-        update.message.reply_text(f"ТП {tp_input} в филиале {branch} не найден.")
+    filial = zones.get(user_id)
+    if filial == "All":
+        update.message.reply_text("Выберите филиал:", reply_markup=branches_keyboard())
+    elif filial in BRANCHES:
+        update.message.reply_text(f"Поиск будет выполняться для филиала {filial}.")
     else:
-        lines = [f"Найдено {cnt} ВОЛС с договором аренды:",
-                 f"{tp_input.upper()} находится в {branch} РЭС"]
-        for _, row in found.iterrows():
-            lines.append(
-                f"ВЛ {row['Наименование ВЛ']}: Опоры: {row['Опоры']}, Кол-во опор: {row['Количество опор']}, Провайдер: {row['Наименование Провайдера']}"
-            )
-        update.message.reply_text("\n".join(lines),
-                                  reply_markup=branches_kb())
-        context.user_data['state'] = 'choose_branch'
+        update.message.reply_text("У вас нет прав доступа.")
 
-# === SELF-PING ===
+
+# === SELF-PING TO KEEP ALIVE ===
 def ping_self():
     if not SELF_URL:
         return
     while True:
         try:
-            requests.get(SELF_URL + '/webhook')
+            requests.get(SELF_URL + "/webhook")
         except:
             pass
         time.sleep(300)
 
-# === REGISTER ===
-dispatcher.add_handler(CommandHandler('start', start))
-dispatcher.add_handler(MessageHandler(Filters.regex('^Поиск$'), handle_search))
-dispatcher.add_handler(MessageHandler(Filters.regex('^(' + '|'.join(BRANCHES) + '|Назад)$'), handle_branch_choice))
-dispatcher.add_handler(MessageHandler(Filters.regex('^(Поиск по ТП|Назад)$'), handle_tp_menu))
-dispatcher.add_handler(MessageHandler(Filters.text & Filters.user(username='*'), handle_tp_search))
+
+# === REGISTER HANDLERS ===
+dispatcher.add_handler(CommandHandler("start", start))
+dispatcher.add_handler(MessageHandler(Filters.regex("^Поиск$"), handle_search))
+
 
 # === WEBHOOK ===
-@app.route('/webhook', methods=['POST'])
+@app.route("/webhook", methods=["POST"])
 def webhook():
-    upd = Update.de_json(request.get_json(force=True), bot)
-    dispatcher.process_update(upd)
-    return jsonify({'status': 'ok'})
+    update = Update.de_json(request.get_json(force=True), bot)
+    dispatcher.process_update(update)
+    return jsonify({"status": "ok"})
 
-# === MAIN ===
-if __name__ == '__main__':
+
+# === RUN ===
+if __name__ == "__main__":
     threading.Thread(target=ping_self, daemon=True).start()
-    app.run(host='0.0.0.0', port=int(os.getenv('PORT', 5000)))
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
