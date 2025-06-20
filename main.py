@@ -89,7 +89,6 @@ def branches_keyboard():
     return ReplyKeyboardMarkup(keys, resize_keyboard=True)
 
 def search_tp_keyboard():
-    # После каждого поиска одна кнопка выбора филиала
     return ReplyKeyboardMarkup([["Выбор филиала"]], resize_keyboard=True)
 
 # === HANDLERS ===
@@ -99,13 +98,17 @@ def start(update: Update, context: CallbackContext):
         branch_zones, res_zones, names = load_zones()
     except Exception as e:
         return update.message.reply_text(f"Ошибка загрузки прав доступа: {e}")
-    branch = branch_zones.get(user_id, "")
-    name   = names.get(user_id, "")
-    # Новый текст приветствия для случая branch != All, res == All
+    # если пользователя нет в списке
+    if user_id not in branch_zones:
+        return update.message.reply_text(
+            "К сожалению, у вас нет доступа, обратитесь к администратору."
+        )
+    branch = branch_zones[user_id]
+    # особое приветствие, если конкретный филиал и все РЭС
     if branch != "All" and res_zones.get(user_id, "") == "All":
-        greet_text = f"Приветствую Вас, {name}! Вы можете просматривать весь филиал."
+        greet_text = f"Приветствую Вас, {names[user_id]}! Вы можете просматривать весь филиал."
     else:
-        greet_text = f"Приветствую Вас, {name}!" if name else "Добро пожаловать!"
+        greet_text = f"Приветствую Вас, {names[user_id]}!" if names[user_id] else "Добро пожаловать!"
     update.message.reply_text(
         f"{greet_text} Нажмите «{'Выбор филиала' if branch=='All' else 'Поиск'}».",
         reply_markup=main_menu_keyboard(branch=='All')
@@ -116,33 +119,36 @@ def handle_text(update: Update, context: CallbackContext):
     text    = update.message.text.strip()
     user_id = update.message.from_user.id
 
-    # Загрузили права
     try:
         branch_zones, res_zones, names = load_zones()
     except Exception as e:
         return update.message.reply_text(f"Ошибка загрузки прав доступа: {e}")
+    # если пользователя нет в списке
+    if user_id not in branch_zones:
+        return update.message.reply_text(
+            "К сожалению, у вас нет доступа, обратитесь к администратору."
+        )
 
-    user_branch = branch_zones.get(user_id, "")
-    user_res    = res_zones.get(user_id, "")
-    name        = names.get(user_id, "")
+    user_branch = branch_zones[user_id]
+    user_res    = res_zones[user_id]
+    name        = names[user_id]
 
-    # Кнопка «Назад» => возвращаемся к главному меню
+    # Назад → главное меню
     if text == "Назад":
         return start(update, context)
 
-    # ALL: выбор филиала
+    # All + выбор филиала
     if user_branch == "All" and text == "Выбор филиала":
         return update.message.reply_text("Выберите филиал:", reply_markup=branches_keyboard())
 
-    # Пользователь с конкретным филиалом сразу переходит к поиску
+    # Пользователь с филиалом сразу к поиску
     if user_branch != "All" and text == "Поиск":
         context.user_data['branch'] = user_branch
         context.user_data['res']    = user_res
         context.user_data['await']  = True
-        # Новый текст приглашения
         return update.message.reply_text("Введите номер ТП:", reply_markup=search_tp_keyboard())
 
-    # Выбор филиала из списка для ALL
+    # Выбор филиала из списка
     if user_branch == "All" and text in BRANCHES:
         context.user_data['branch'] = text
         context.user_data['res']    = "All"
@@ -151,10 +157,9 @@ def handle_text(update: Update, context: CallbackContext):
 
     # Обработка ввода ТП
     if context.user_data.get('await') and context.user_data.get('branch'):
-        branch = context.user_data['branch']
-        res_perm = context.user_data['res']  # может быть "All" или конкретный РЭС
+        branch   = context.user_data['branch']
+        res_perm = context.user_data['res']
 
-        # Загружаем CSV таблицы филиала
         sheet_url = BRANCH_URLS.get(branch)
         if not sheet_url:
             return update.message.reply_text("Не задана таблица для этого филиала.")
@@ -169,7 +174,6 @@ def handle_text(update: Update, context: CallbackContext):
         df['D_UP'] = df['Наименование ТП'].str.upper().str.replace("ТП-", "")
         found_all = df[df['D_UP'].str.contains(tp_input, na=False)]
 
-        # права: фильтрация по РЭС
         if not found_all.empty and res_perm != "All":
             found = found_all[found_all['РЭС'] == res_perm]
             if found.empty:
@@ -195,7 +199,6 @@ def handle_text(update: Update, context: CallbackContext):
                 )
             resp = "\n".join(lines)
 
-        # Ответ и приглашение вводить новую ТП или выбрать филиал
         update.message.reply_text(resp, reply_markup=search_tp_keyboard())
         update.message.reply_text(
             f"{name}, введите номер ТП или выберите Филиал ЭС",
@@ -220,7 +223,7 @@ def ping_self():
             pass
         time.sleep(300)
 
-# === REGISTRATION ===
+# === РЕГИСТРАЦИЯ ===
 dispatcher.add_handler(CommandHandler('start', start))
 dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_text))
 
