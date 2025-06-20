@@ -14,9 +14,9 @@ TOKEN         = os.getenv("TOKEN")
 SELF_URL      = os.getenv("SELF_URL", "").rstrip('/')
 ZONES_CSV_URL = os.getenv("ZONES_CSV_URL", "").strip()
 
-# === Филиальные таблицы ===
+# Филиальные таблицы
 BRANCH_URLS = {
-    "Юго-Западные ЭС":   os.getenv("YUGO_ZAPAD_ES_URL", ""),
+    "Юго-Западные ЭС": os.getenv("YUGO_ZAPAD_ES_URL", ""),
     "Усть-Лабинские ЭС": os.getenv("UST_LAB_ES_URL", ""),
     "Тимашевские ЭС":    os.getenv("TIMASHEV_ES_URL", ""),
     "Тихорецкие ЭС":     os.getenv("TIKHORETS_ES_URL", ""),
@@ -28,6 +28,7 @@ BRANCH_URLS = {
     "Армавирские ЭС":    os.getenv("ARMAVIR_ES_URL", ""),
     "Адыгейские ЭС":     os.getenv("ADYGEA_ES_URL", ""),
 }
+
 BRANCHES = list(BRANCH_URLS.keys())
 
 # === SETUP ===
@@ -54,19 +55,26 @@ def normalize_sheet_url(url: str) -> str:
     return url
 
 def load_zones():
+    """
+    Возвращает три словаря:
+      branch_zones[uid] = филиал (str)
+      res_zones[uid]    = РЭС     (str)
+      names[uid]        = ФИО     (str)
+    """
     url = normalize_sheet_url(ZONES_CSV_URL)
     r   = requests.get(url, timeout=10); r.raise_for_status()
     text = r.content.decode('utf-8-sig')
-    df  = pd.read_csv(StringIO(text), header=None, skiprows=1)
-    zones, names = {}, {}
+    df   = pd.read_csv(StringIO(text), header=None, skiprows=1)
+    branch_zones, res_zones, names = {}, {}, {}
     for _, row in df.iterrows():
         try:
             uid = int(row[2])
         except:
             continue
-        zones[uid] = str(row[0]).strip()
-        names[uid] = str(row[3]).strip()
-    return zones, names
+        branch_zones[uid] = str(row[0]).strip()  # колонка A
+        res_zones[uid]    = str(row[1]).strip()  # колонка B
+        names[uid]        = str(row[3]).strip()  # колонка D
+    return branch_zones, res_zones, names
 
 # === KEYBOARDS ===
 def main_menu_keyboard(is_all=False):
@@ -77,60 +85,77 @@ def main_menu_keyboard(is_all=False):
 
 def branches_keyboard():
     keys = [[b] for b in BRANCHES]
-    keys.append(["Выбор филиала"])
+    keys.append(["Назад"])
     return ReplyKeyboardMarkup(keys, resize_keyboard=True)
 
-def branch_choice_keyboard():
+def search_tp_keyboard():
+    # После каждого поиска одна кнопка выбора филиала
     return ReplyKeyboardMarkup([["Выбор филиала"]], resize_keyboard=True)
 
 # === HANDLERS ===
 def start(update: Update, context: CallbackContext):
     user_id = update.message.from_user.id
     try:
-        zones, names = load_zones()
+        branch_zones, res_zones, names = load_zones()
     except Exception as e:
         return update.message.reply_text(f"Ошибка загрузки прав доступа: {e}")
-    filial = zones.get(user_id)
-    name   = names.get(user_id)
+    branch = branch_zones.get(user_id, "")
+    name   = names.get(user_id, "")
     greet  = f"Приветствую Вас, {name}!" if name else "Добро пожаловать!"
     update.message.reply_text(
-        f"{greet} Нажмите «{'Выбор филиала' if filial=='All' else 'Поиск'}».",
-        reply_markup=main_menu_keyboard(filial=='All')
+        f"{greet} Нажмите «{'Выбор филиала' if branch=='All' else 'Поиск'}».",
+        reply_markup=main_menu_keyboard(branch=='All')
     )
     context.user_data.clear()
 
 def handle_text(update: Update, context: CallbackContext):
     text    = update.message.text.strip()
     user_id = update.message.from_user.id
-    zones, names = load_zones()
-    filial = zones.get(user_id)
-    name   = names.get(user_id)
 
-    # Выбрать филиал
-    if filial == "All" and text == "Выбор филиала":
+    # Загрузили права
+    try:
+        branch_zones, res_zones, names = load_zones()
+    except Exception as e:
+        return update.message.reply_text(f"Ошибка загрузки прав доступа: {e}")
+
+    user_branch = branch_zones.get(user_id, "")
+    user_res    = res_zones.get(user_id, "")
+    name        = names.get(user_id, "")
+
+    # Кнопка «Назад» => возвращаемся к главному меню
+    if text == "Назад":
+        return start(update, context)
+
+    # ALL: выбор филиала
+    if user_branch == "All" and text == "Выбор филиала":
         return update.message.reply_text("Выберите филиал:", reply_markup=branches_keyboard())
 
-    # Переключиться на новый филиал
-    if text in BRANCHES:
-        context.user_data['branch']  = text
-        context.user_data['await_tp'] = True
+    # Пользователь с конкретным филиалом сразу переходит к поиску
+    if user_branch != "All" and text == "Поиск":
+        context.user_data['branch'] = user_branch
+        context.user_data['res']    = user_res
+        context.user_data['await']  = True
         return update.message.reply_text(
-            f"Выбран филиал {text}. Введите номер ТП:",
-            reply_markup=branch_choice_keyboard()
+            f"Выбран филиал {user_branch}. Введите номер ТП:",
+            reply_markup=search_tp_keyboard()
         )
 
-    # Пользователь без All — сразу ввести ТП
-    if filial != "All" and text == "Поиск":
-        context.user_data['branch']  = filial
-        context.user_data['await_tp'] = True
+    # Выбор филиала из списка для ALL
+    if user_branch == "All" and text in BRANCHES:
+        context.user_data['branch'] = text
+        context.user_data['res']    = "All"
+        context.user_data['await']  = True
         return update.message.reply_text(
-            f"Выбран филиал {filial}. Введите номер ТП:",
-            reply_markup=branch_choice_keyboard()
+            f"Выбран филиал {text}. Введите номер ТП:",
+            reply_markup=search_tp_keyboard()
         )
 
     # Обработка ввода ТП
-    if context.user_data.get('await_tp') and context.user_data.get('branch'):
-        branch    = context.user_data['branch']
+    if context.user_data.get('await') and context.user_data.get('branch'):
+        branch = context.user_data['branch']
+        res_perm = context.user_data['res']  # может быть "All" или конкретный РЭС
+
+        # Загружаем CSV таблицы филиала
         sheet_url = BRANCH_URLS.get(branch)
         if not sheet_url:
             return update.message.reply_text("Не задана таблица для этого филиала.")
@@ -141,39 +166,54 @@ def handle_text(update: Update, context: CallbackContext):
         except Exception as e:
             return update.message.reply_text(f"Ошибка загрузки таблицы {branch}: {e}")
 
+        # ищем первые совпадения по TP
         tp_input = text.upper().replace("ТП-", "").strip()
         df['D_UP'] = df['Наименование ТП'].str.upper().str.replace("ТП-", "")
-        found = df[df['D_UP'].str.contains(tp_input, na=False)]
+        found_all = df[df['D_UP'].str.contains(tp_input, na=False)]
+
+        # права: если есть общие совпадения, но без права на их просмотр
+        # сначала отфильтруем по РЭС
+        if not found_all.empty and res_perm != "All":
+            found = found_all[found_all['РЭС'] == res_perm]
+            if found.empty:
+                return update.message.reply_text(
+                    f"{name}, к сожалению, у вас нет прав просмотра данной ТП.",
+                    reply_markup=search_tp_keyboard()
+                )
+        else:
+            found = found_all
 
         if found.empty:
             resp = "Совпадений не найдено."
         else:
-            tp_name  = found.iloc[0]['Наименование ТП']
+            # Группируем вывод:
+            count = len(found)
+            # Получаем РЭС из первой строки результата
             res_name = found.iloc[0]['РЭС']
-            count    = len(found)
-            lines = [
-                f"Найдено {count} ВОЛС с договором аренды:",
-                f"{tp_name} находится в {res_name} РЭС",
-                ""
-            ]
+            lines = [f"Найдено {count} ВОЛС с договором аренды:",
+                     f"{found.iloc[0]['Наименование ТП']} находится в {res_name}"]
+            # Для читабельности пустая строка между ВЛ
             for _, row in found.iterrows():
+                lines.append("")  # разделитель
                 lines.append(
-                    f"ВЛ {row['Наименование ВЛ']}: Опоры: **{row['Опоры']}**, "
+                    f"ВЛ {row['Наименование ВЛ']}: **Опоры**: {row['Опоры']}, "
                     f"Кол-во опор: {row['Количество опор']}, Провайдер: {row['Наименование Провайдера']}"
                 )
-                lines.append("")  # разделитель
+            resp = "\n".join(lines)
 
-            resp = "\n".join(lines).strip()
-
-        # После выдачи оставляем await_tp=True, чтобы сразу ввести новый TP
-        return update.message.reply_text(
-            f"{resp}\n\n{name}, введите номер ТП или выберите Филиал ЭС",
-            reply_markup=branch_choice_keyboard(),
-            parse_mode='Markdown'
+        # После ответа остаёмся в режиме await и предлагаем новый ввод
+        update.message.reply_text(resp, reply_markup=search_tp_keyboard())
+        update.message.reply_text(
+            f"{name}, введите номер ТП или выберите Филиал ЭС",
+            reply_markup=search_tp_keyboard()
         )
+        return
 
-    # Любой другой ввод — начать сначала
-    return start(update, context)
+    # Во всех остальных случаях
+    return update.message.reply_text(
+        "Нажмите одну из кнопок меню.",
+        reply_markup=main_menu_keyboard(user_branch=='All')
+    )
 
 # === SELF-PING ===
 def ping_self():
