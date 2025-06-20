@@ -9,9 +9,9 @@ from telegram import Bot, Update, ReplyKeyboardMarkup
 from telegram.ext import Dispatcher, CommandHandler, MessageHandler, Filters, CallbackContext
 
 # === ENVIRONMENT VARIABLES ===
-# TOKEN       - Telegram Bot Token
-# SELF_URL    - URL of this service (for self-ping)
-# ZONES_CSV_URL - Google Sheets CSV export URL with zones data
+# TOKEN           - Telegram Bot Token
+# SELF_URL        - URL of this service (for self-ping)
+# ZONES_CSV_URL   - Google Sheets CSV export URL with zones data
 TOKEN = os.getenv("TOKEN")
 SELF_URL = os.getenv("SELF_URL", "").rstrip('/')
 ZONES_CSV_URL = os.getenv("ZONES_CSV_URL", "").strip()
@@ -38,13 +38,27 @@ dispatcher = Dispatcher(bot, None, use_context=True)
 # === HELPER FUNCTIONS ===
 
 def normalize_sheet_url(url: str) -> str:
-    # Convert Google Sheets/Drive link to direct CSV download
+    """
+    Convert various Google Sheets/Drive URLs to a direct CSV download link.
+    Supports:
+      - Already exported CSV links
+      - Published sheet links (/d/e/ID/)
+      - Standard sheet links (/d/ID)
+      - Drive file links (/file/d/ID)
+    """
     if '/export' in url or url.endswith('.csv'):
         return url
+    # Published sheet (public) URLs
+    m = re.search(r'/d/e/([\w-]+)/', url)
+    if m:
+        sid = m.group(1)
+        return f'https://docs.google.com/spreadsheets/d/e/{sid}/export?format=csv&gid=0'
+    # Standard sheet link
     m = re.search(r'/d/([\w-]+)', url)
     if m:
         sid = m.group(1)
         return f'https://docs.google.com/spreadsheets/d/{sid}/export?format=csv&gid=0'
+    # Drive file link
     m2 = re.search(r'/file/d/([\w-]+)', url)
     if m2:
         fid = m2.group(1)
@@ -53,7 +67,7 @@ def normalize_sheet_url(url: str) -> str:
 
 
 def load_zones() -> dict:
-    # Load zones CSV into dict: {user_id: filial}
+    # Load zones CSV into dict: user_id -> filial
     url = normalize_sheet_url(ZONES_CSV_URL)
     resp = requests.get(url, timeout=10)
     resp.raise_for_status()
@@ -61,7 +75,8 @@ def load_zones() -> dict:
     df.columns = df.columns.str.strip().str.upper()
     required = {'ФИЛИАЛ', 'РЭС', 'ID', 'ФИО'}
     if not required.issubset(df.columns):
-        raise ValueError(f"Missing columns in zones file: {required - set(df.columns)}")
+        missing = required - set(df.columns)
+        raise ValueError(f"Отсутствуют колонки: {missing}")
     return {int(row['ID']): row['ФИЛИАЛ'] for _, row in df.iterrows()}
 
 # === KEYBOARDS ===
@@ -81,19 +96,15 @@ def start(update: Update, context: CallbackContext):
         reply_markup=main_menu_keyboard()
     )
 
+
 def handle_search(update: Update, context: CallbackContext):
-    # Determine user zone and show branches if 'All'
     user_id = update.message.from_user.id
     zones = load_zones()
     filial = zones.get(user_id)
     if filial == 'All':
-        update.message.reply_text(
-            "Выберите филиал:", reply_markup=branches_keyboard()
-        )
+        update.message.reply_text("Выберите филиал:", reply_markup=branches_keyboard())
     elif filial in BRANCHES:
-        update.message.reply_text(
-            f"Поиск будет выполняться для филиала {filial}."
-        )
+        update.message.reply_text(f"Поиск будет выполняться для филиала {filial}.")
     else:
         update.message.reply_text("У вас нет прав доступа.")
 
@@ -108,8 +119,7 @@ def ping_self():
             pass
         time.sleep(300)
 
-# Register handlers
-
+# === REGISTER HANDLERS ===
 dispatcher.add_handler(CommandHandler('start', start))
 dispatcher.add_handler(MessageHandler(Filters.regex('^Поиск$'), handle_search))
 
