@@ -12,7 +12,7 @@ from telegram.ext import Dispatcher, CommandHandler, MessageHandler, Filters, Ca
 # === ENVIRONMENT VARIABLES ===
 # TOKEN           - Telegram Bot Token
 # SELF_URL        - URL of this service (for self-ping), без конца "/"
-# ZONES_CSV_URL   - Google Sheets CSV export URL with zones data
+# ZONES_CSV_URL   - Google Sheets CSV export URL (publish → “CSV”)
 TOKEN = os.getenv("TOKEN")
 SELF_URL = os.getenv("SELF_URL", "").rstrip('/')
 ZONES_CSV_URL = os.getenv("ZONES_CSV_URL", "").strip()
@@ -39,47 +39,48 @@ dispatcher = Dispatcher(bot, None, use_context=True)
 # === HELPERS ===
 
 def normalize_sheet_url(url: str) -> str:
-    """
-    Convert various Google Sheets/Drive URLs to a direct CSV download link.
-    Если в URL уже стоит output=csv или /export или это .csv — возвращаем как есть.
-    Иначе собираем прямой экспорт.
-    """
+    """Преобразует любой опубликованный Google Sheets URL в CSV-экспорт."""
     if 'output=csv' in url or '/export' in url or url.endswith('.csv'):
         return url
-    # Published sheet (public) URLs
     m = re.search(r'/d/e/([\w-]+)/', url)
     if m:
         sid = m.group(1)
         return f'https://docs.google.com/spreadsheets/d/e/{sid}/export?format=csv&gid=0'
-    # Standard sheet link
     m = re.search(r'/d/([\w-]+)', url)
     if m:
         sid = m.group(1)
         return f'https://docs.google.com/spreadsheets/d/{sid}/export?format=csv&gid=0'
-    # Drive file link
     m2 = re.search(r'/file/d/([\w-]+)', url)
     if m2:
         fid = m2.group(1)
         return f'https://drive.google.com/uc?export=download&id={fid}'
     return url
 
-def load_zones() -> dict:
+def load_zones() -> (dict, dict):
     """
-    Загружает CSV из ZONES_CSV_URL и возвращает словарь user_id -> filial.
-    Ожидаемые колонки в CSV: ФИЛИАЛ, РЭС, ID, ФИО
+    Загружает CSV без учёта заголовков:
+    Колонка A — филиал, B — РЭС, C — ID, D — ФИО.
+    Возвращает два словаря:
+      zones_map: user_id -> филиал
+      names_map: user_id -> ФИО
     """
     url = normalize_sheet_url(ZONES_CSV_URL)
     resp = requests.get(url, timeout=10)
     resp.raise_for_status()
-    # Читаем как CSV
-    df = pd.read_csv(StringIO(resp.text))
-    df.columns = df.columns.str.strip().str.upper()
-    required = {'ФИЛИАЛ', 'РЭС', 'ID', 'ФИО'}
-    if not required.issubset(df.columns):
-        missing = required - set(df.columns)
-        raise ValueError(f"Отсутствуют колонки: {missing}")
-    # Преобразуем в dict: ID (int) -> ФИЛИАЛ
-    return {int(row['ID']): row['ФИЛИАЛ'] for _, row in df.iterrows()}
+    df = pd.read_csv(StringIO(resp.text), header=None, skiprows=1)
+    if df.shape[1] < 4:
+        raise ValueError(f"В таблице должно быть минимум 4 колонки, найдено {df.shape[1]}")
+    # столбцы: 0=филиал,1=РЭС,2=ID,3=ФИО
+    zones_map = {}
+    names_map = {}
+    for _, row in df.iterrows():
+        try:
+            uid = int(row[2])
+        except:
+            continue
+        zones_map[uid] = str(row[0]).strip()
+        names_map[uid] = str(row[3]).strip()
+    return zones_map, names_map
 
 # === KEYBOARDS ===
 
@@ -94,17 +95,26 @@ def branches_keyboard():
 # === HANDLERS ===
 
 def start(update: Update, context: CallbackContext):
-    update.message.reply_text(
-        "Добро пожаловать! Нажмите 'Поиск' для выбора филиала.",
-        reply_markup=main_menu_keyboard()
-    )
+    user_id = update.message.from_user.id
+    try:
+        zones, names = load_zones()
+    except Exception as e:
+        update.message.reply_text(f"Ошибка загрузки прав доступа: {e}")
+        return
+
+    name = names.get(user_id)
+    if name:
+        greeting = f"Привет, {name}! Нажмите 'Поиск' для выбора филиала."
+    else:
+        greeting = "Добро пожаловать! Нажмите 'Поиск' для выбора филиала."
+    update.message.reply_text(greeting, reply_markup=main_menu_keyboard())
 
 def handle_search(update: Update, context: CallbackContext):
     user_id = update.message.from_user.id
     try:
-        zones = load_zones()
+        zones, _ = load_zones()
     except Exception as e:
-        update.message.reply_text(f"Ошибка чтения прав доступа: {e}")
+        update.message.reply_text(f"Ошибка загрузки прав доступа: {e}")
         return
 
     filial = zones.get(user_id)
@@ -143,7 +153,5 @@ def webhook():
 # === RUN APPLICATION ===
 
 if __name__ == '__main__':
-    # Запускаем самопинг для удержания
     threading.Thread(target=ping_self, daemon=True).start()
-    # Запускаем Flask
     app.run(host='0.0.0.0', port=int(os.getenv('PORT', 5000)))
