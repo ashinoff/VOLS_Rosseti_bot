@@ -144,8 +144,10 @@ def handle_text(update: Update, context: CallbackContext):
 
         options = context.user_data['ambiguous']
         if text in options:
-            found = context.user_data['ambiguous_df']
+            amb_df = context.user_data['ambiguous_df']
             tp_sel = text
+            # теперь отфильтровать только выбранный ТП
+            found = amb_df[amb_df['Наименование ТП'] == tp_sel]
             lines = [f"На {tp_sel} {len(found)} ВОЛС с договором аренды.", ""]
             for _, r0 in found.iterrows():
                 lines.append(f"ВЛ {r0['Уровень напряжения']} {r0['Наименование ВЛ']}:")
@@ -244,8 +246,6 @@ def handle_text(update: Update, context: CallbackContext):
         lines.append("")
     resp = "\n".join(lines).strip()
 
-    # вот здесь — вместо одного большого update.message.reply_text(resp)
-    # мы разбиваем на удобные блоки ≤4000 симв.
     send_long(update, resp, reply_markup=kb_search_select())
     update.message.reply_text(f"{name}, задание выполнено!", reply_markup=kb_search_select())
 
