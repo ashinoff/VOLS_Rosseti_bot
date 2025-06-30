@@ -8,7 +8,6 @@ from io import StringIO
 from flask import Flask, request, jsonify
 from telegram import Bot, Update, ReplyKeyboardMarkup
 from telegram.ext import Dispatcher, CommandHandler, MessageHandler, Filters, CallbackContext
-from telegram.error import BadRequest
 
 # === ENVIRONMENT VARIABLES ===
 TOKEN         = os.getenv("TOKEN")
@@ -59,9 +58,9 @@ def load_zones():
             uid = int(row[2])
         except:
             continue
-        bz[uid]    = row[0].strip()
-        rz[uid]    = row[1].strip()
-        names[uid] = row[3].strip()
+        bz[uid]    = row[0].strip()  # филиал или All
+        rz[uid]    = row[1].strip()  # РЭС или All
+        names[uid] = row[3].strip()  # ФИО
     return bz, rz, names
 
 def kb_select_branch():
@@ -73,24 +72,24 @@ def kb_search_select():
 def kb_only_select():
     return ReplyKeyboardMarkup([["Выбор филиала"]], resize_keyboard=True)
 
-def kb_ambiguous(options):
-    keys = [[opt] for opt in options] + [["Назад"]]
-    return ReplyKeyboardMarkup(keys, resize_keyboard=True)
-
-def send_long(update: Update, text: str, **kwargs):
-    MAX = 4000
-    while text:
-        part, text = text[:MAX], text[MAX:]
-        try:
-            update.message.reply_text(part, **kwargs)
-        except BadRequest:
-            update.message.reply_text(part)
-
 @app.route('/webhook', methods=['POST'])
 def webhook():
     upd = Update.de_json(request.get_json(force=True), bot)
     dispatcher.process_update(upd)
     return jsonify({'ok': True})
+
+# helper to split long messages into ≤4000-char chunks
+def send_long(update: Update, text: str, reply_markup=None):
+    MAX = 4000
+    lines = text.split('\n')
+    chunk = ""
+    for line in lines:
+        if len(chunk) + len(line) + 1 > MAX:
+            update.message.reply_text(chunk.strip(), reply_markup=reply_markup)
+            chunk = ""
+        chunk += line + "\n"
+    if chunk:
+        update.message.reply_text(chunk.strip(), reply_markup=reply_markup)
 
 def start(update: Update, context: CallbackContext):
     uid = update.message.from_user.id
@@ -104,14 +103,15 @@ def start(update: Update, context: CallbackContext):
 
     if branch == "All" and res == "All":
         context.user_data['mode'] = 1
-        send_long(update,
-            f"Приветствую Вас, {name}! Вы можете осуществлять поиск в любом филиале.\nНажмите «Выбор филиала».",
+        update.message.reply_text(
+            f"Приветствую Вас, {name}! Вы можете осуществлять поиск в любом филиале.\n"
+            f"Нажмите «Выбор филиала».",
             reply_markup=kb_only_select()
         )
     elif branch != "All" and res == "All":
         context.user_data['mode'] = 2
         context.user_data['current_branch'] = branch
-        send_long(update,
+        update.message.reply_text(
             f"Приветствую Вас, {name}! Вы можете просматривать только филиал {branch}.",
             reply_markup=kb_search_select()
         )
@@ -119,7 +119,7 @@ def start(update: Update, context: CallbackContext):
         context.user_data['mode'] = 3
         context.user_data['current_branch'] = branch
         context.user_data['current_res']    = res
-        send_long(update,
+        update.message.reply_text(
             f"Приветствую Вас, {name}! Вы можете просматривать только {res} РЭС филиала {branch}.",
             reply_markup=kb_search_select()
         )
@@ -135,13 +135,15 @@ def handle_text(update: Update, context: CallbackContext):
     branch, res, name = bz[uid], rz[uid], names[uid]
     mode = context.user_data.get('mode', 1)
 
-    # Разрешаем выйти из неоднозначности
+    # возврат из неоднозначности
     if context.user_data.get('ambiguous'):
         if text == "Назад":
             context.user_data.pop('ambiguous')
             context.user_data.pop('ambiguous_df')
             return update.message.reply_text(f"{name}, введите номер ТП.", reply_markup=kb_search_select())
-        if text in context.user_data['ambiguous']:
+
+        options = context.user_data['ambiguous']
+        if text in options:
             found = context.user_data['ambiguous_df']
             tp_sel = text
             lines = [f"На {tp_sel} {len(found)} ВОЛС с договором аренды.", ""]
@@ -156,12 +158,12 @@ def handle_text(update: Update, context: CallbackContext):
                 lines.append("")
             resp = "\n".join(lines).strip()
             send_long(update, resp, reply_markup=kb_search_select())
-            send_long(update, f"{name}, задание выполнено!", reply_markup=kb_search_select())
+            update.message.reply_text(f"{name}, задание выполнено!", reply_markup=kb_search_select())
             context.user_data.pop('ambiguous')
             context.user_data.pop('ambiguous_df')
             return
 
-    # Кнопка выбор филиала
+    # кнопка «Выбор филиала»
     if text == "Выбор филиала":
         if mode == 1:
             return update.message.reply_text("Выберите филиал:", reply_markup=kb_select_branch())
@@ -170,53 +172,68 @@ def handle_text(update: Update, context: CallbackContext):
         else:
             return update.message.reply_text(f"{name}, Вы можете просматривать только {res} РЭС филиала {branch}.", reply_markup=kb_search_select())
 
-    # Определяем branch_search
+    # определяем branch_search для поиска
     if mode == 1:
         if text in BRANCHES:
             context.user_data['current_branch'] = text
             return update.message.reply_text(f"{name}, введите номер ТП.", reply_markup=kb_search_select())
-        if text != "Поиск по ТП":
-            return update.message.reply_text("Нажмите «Поиск по ТП» или «Выбор филиала».", reply_markup=kb_search_select())
-        if 'current_branch' not in context.user_data:
-            return update.message.reply_text("Сначала выберите филиал:", reply_markup=kb_select_branch())
-        branch_search = context.user_data['current_branch']
-    else:
         if text == "Поиск по ТП":
+            if 'current_branch' not in context.user_data:
+                return update.message.reply_text("Сначала выберите филиал:", reply_markup=kb_select_branch())
             return update.message.reply_text(f"{name}, введите номер ТП.", reply_markup=kb_search_select())
+        if 'current_branch' in context.user_data:
+            branch_search = context.user_data['current_branch']
+        else:
+            return
+
+    elif mode == 2:
         branch_search = branch
 
-    # Загружаем таблицу
-    table_url = BRANCH_URLS.get(branch_search)
+    else:  # mode == 3
+        branch_search = branch
+
+    # загрузка таблицы
     try:
-        df = pd.read_csv(normalize_sheet_url(table_url))
+        df = pd.read_csv(normalize_sheet_url(BRANCH_URLS[branch_search]))
     except Exception as e:
         return update.message.reply_text(f"Ошибка загрузки таблицы: {e}", reply_markup=kb_search_select())
 
-    # Фильтр по РЭС для mode 3
+    # фильтрация по РЭС для режима 3
     if mode == 3:
         df = df[df["РЭС"] == res]
 
-    # Обработка ввода ТП
-    tp = text.upper().replace("ТП-", "").strip()
-    df['D_UP'] = df['Наименование ТП'].str.upper().str.replace("ТП-", "")
-    matched = df[df['D_UP'].str.contains(tp, na=False)]
+    # подготовка колонок
+    df.columns = df.columns.str.strip()
 
-    if matched.empty:
-        msg = "Договоров ВОЛС на данной ТП нет, либо название ТП введено некорректно."
-        return update.message.reply_text(msg, reply_markup=kb_search_select())
-    if len(matched['Наименование ТП'].unique()) > 1:
-        options = matched['Наименование ТП'].unique().tolist()
-        context.user_data['ambiguous']    = options
-        context.user_data['ambiguous_df'] = matched
+    # нормализация для поиска
+    def norm(s): return re.sub(r'\W','', str(s).upper())
+    tp_input = norm(text)
+    df['D_UP'] = df['Наименование ТП'].apply(norm)
+
+    found = df[df['D_UP'].str.contains(tp_input, na=False)]
+
+    # неоднозначность
+    unique_tp = found['Наименование ТП'].unique().tolist()
+    if len(unique_tp) > 1:
+        kb = ReplyKeyboardMarkup([[tp] for tp in unique_tp] + [["Назад"]], resize_keyboard=True)
+        context.user_data['ambiguous']    = unique_tp
+        context.user_data['ambiguous_df'] = found
         return update.message.reply_text(
-            "Возможно вы искали другое ТП, выберите из списка ниже:",
-            reply_markup=kb_ambiguous(options)
+            "Возможно, вы искали другое ТП, выберите из списка ниже:",
+            reply_markup=kb
         )
 
-    # Единичный результат
-    tp_name = matched.iloc[0]['Наименование ТП']
-    lines = [f"На {tp_name} {len(matched)} ВОЛС с договором аренды.", ""]
-    for _, r0 in matched.iterrows():
+    # ничего не нашлось
+    if found.empty:
+        return update.message.reply_text(
+            "Договоров ВОЛС на данной ТП нет, либо название ТП введено некорректно.",
+            reply_markup=kb_search_select()
+        )
+
+    # вывод результата
+    tp_name = unique_tp[0]
+    lines = [f"На {tp_name} {len(found)} ВОЛС с договором аренды.", ""]
+    for _, r0 in found.iterrows():
         lines.append(f"ВЛ {r0['Уровень напряжения']} {r0['Наименование ВЛ']}:")
         lines.append(f"Опоры: {r0['Опоры']}")
         lines.append(f"Кол-во опор: {r0['Количество опор']}")
@@ -226,8 +243,11 @@ def handle_text(update: Update, context: CallbackContext):
         lines.append(f"Провайдер: {prov}{tail}")
         lines.append("")
     resp = "\n".join(lines).strip()
+
+    # вот здесь — вместо одного большого update.message.reply_text(resp)
+    # мы разбиваем на удобные блоки ≤4000 симв.
     send_long(update, resp, reply_markup=kb_search_select())
-    send_long(update, f"{name}, задание выполнено!", reply_markup=kb_search_select())
+    update.message.reply_text(f"{name}, задание выполнено!", reply_markup=kb_search_select())
 
 dispatcher.add_handler(CommandHandler('start', start))
 dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_text))
