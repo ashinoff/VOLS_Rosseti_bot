@@ -63,7 +63,6 @@ def load_zones():
         names[uid] = row[3].strip()  # ФИО
     return bz, rz, names
 
-# клавиатуры
 def kb_select_branch():
     return ReplyKeyboardMarkup([[b] for b in BRANCHES], resize_keyboard=True)
 
@@ -88,7 +87,7 @@ def start(update: Update, context: CallbackContext):
     if uid not in bz:
         return update.message.reply_text("К сожалению, у вас нет доступа, обратитесь к администратору.")
     branch, res, name = bz[uid], rz[uid], names[uid]
-    # определить зону
+
     if branch == "All" and res == "All":
         context.user_data['mode'] = 1
         update.message.reply_text(
@@ -111,8 +110,8 @@ def start(update: Update, context: CallbackContext):
             f"Приветствую Вас, {name}! Вы можете просматривать только {res} РЭС филиала {branch}.",
             reply_markup=kb_search_select()
         )
-    context.user_data.pop('await_search', None)
     context.user_data.pop('ambiguous', None)
+    context.user_data.pop('ambiguous_df', None)
 
 def handle_text(update: Update, context: CallbackContext):
     text = update.message.text.strip()
@@ -123,33 +122,35 @@ def handle_text(update: Update, context: CallbackContext):
     branch, res, name = bz[uid], rz[uid], names[uid]
     mode = context.user_data.get('mode', 1)
 
-    # --- обработка уточнения при неоднозначном вводе ---
+    # --- возврат из неоднозначности ---
     if context.user_data.get('ambiguous'):
+        if text == "Назад":
+            context.user_data.pop('ambiguous')
+            context.user_data.pop('ambiguous_df')
+            return update.message.reply_text(f"{name}, введите номер ТП.", reply_markup=kb_search_select())
+
         options = context.user_data['ambiguous']
         if text in options:
-            # подтвердили ТП
-            found_df = context.user_data['ambiguous_df']
-            sel = text
-            found = found_df[found_df['Наименование ТП']==sel]
-            # вывести информацию
-            lines = [f"На {sel} {len(found)} ВОЛС с договором аренды.", ""]
+            found = context.user_data['ambiguous_df']
+            tp_sel = text
+            lines = [f"На {tp_sel} {len(found)} ВОЛС с договором аренды.", ""]
             for _, r0 in found.iterrows():
                 lines.append(f"ВЛ {r0['Уровень напряжения']} {r0['Наименование ВЛ']}:")
                 lines.append(f"Опоры: {r0['Опоры']}")
                 lines.append(f"Кол-во опор: {r0['Количество опор']}")
-                lines.append(f"Провайдер: {r0['Наименование Провайдера']}, {r0['Номер договора']}")
-                lines.append("")  # разделитель
+                prov = r0.get('Наименование Провайдера', '')
+                num  = r0.get('Номер договора', '')
+                tail = f", {num}" if num else ""
+                lines.append(f"Провайдер: {prov}{tail}")
+                lines.append("")
             resp = "\n".join(lines).strip()
             update.message.reply_text(resp, reply_markup=kb_search_select())
-            update.message.reply_text(f"{name}, задание выполнено.", reply_markup=kb_search_select())
+            update.message.reply_text(f"{name}, задание выполнено!", reply_markup=kb_search_select())
             context.user_data.pop('ambiguous')
             context.user_data.pop('ambiguous_df')
             return
-        # если ввели не из списка — сброс
-        context.user_data.pop('ambiguous')
-        context.user_data.pop('ambiguous_df')
 
-    # кнопка "Выбор филиала"
+    # кнопка «Выбор филиала»
     if text == "Выбор филиала":
         if mode == 1:
             return update.message.reply_text("Выберите филиал:", reply_markup=kb_select_branch())
@@ -158,7 +159,7 @@ def handle_text(update: Update, context: CallbackContext):
         else:
             return update.message.reply_text(f"{name}, Вы можете просматривать только {res} РЭС филиала {branch}.", reply_markup=kb_search_select())
 
-    # зона1: All/All
+    # определяем branch_search для поиска
     if mode == 1:
         if text in BRANCHES:
             context.user_data['current_branch'] = text
@@ -172,24 +173,15 @@ def handle_text(update: Update, context: CallbackContext):
         else:
             return
 
-    # зона2: branch/All
-    if mode == 2:
-        if text == "Поиск по ТП":
-            return update.message.reply_text(f"{name}, введите номер ТП.", reply_markup=kb_search_select())
-        if text not in ("Поиск по ТП",):
-            branch_search = branch
+    elif mode == 2:
+        branch_search = branch if text in ("Поиск по ТП",) or True else None  # всегда branch
 
-    # зона3: branch/res
-    if mode == 3:
-        if text == "Поиск по ТП":
-            return update.message.reply_text(f"{name}, введите номер ТП.", reply_markup=kb_search_select())
-        if text not in ("Поиск по ТП",):
-            branch_search = branch
+    else:  # mode == 3
+        branch_search = branch
 
-    # если мы здесь — это ввод ТП
-    table_url = BRANCH_URLS.get(branch_search)
+    # загрузка таблицы
     try:
-        df = pd.read_csv(normalize_sheet_url(table_url))
+        df = pd.read_csv(normalize_sheet_url(BRANCH_URLS[branch_search]))
     except Exception as e:
         return update.message.reply_text(f"Ошибка загрузки таблицы: {e}", reply_markup=kb_search_select())
 
@@ -197,41 +189,46 @@ def handle_text(update: Update, context: CallbackContext):
     if mode == 3:
         df = df[df["РЭС"] == res]
 
+    # подготовка колонок
+    df.columns = df.columns.str.strip()
+
     # нормализация для поиска
     def norm(s): return re.sub(r'\W','', str(s).upper())
     tp_input = norm(text)
     df['D_UP'] = df['Наименование ТП'].apply(norm)
 
-    # найдём все совпадения D_UP содержит tp_input
     found = df[df['D_UP'].str.contains(tp_input, na=False)]
 
-    # если есть несколько разных TP-имен — уточним
+    # неоднозначность
     unique_tp = found['Наименование ТП'].unique().tolist()
     if len(unique_tp) > 1:
-        # сохраняем фрейм и список вариантов
+        kb = ReplyKeyboardMarkup([[tp] for tp in unique_tp] + [["Назад"]], resize_keyboard=True)
         context.user_data['ambiguous']    = unique_tp
         context.user_data['ambiguous_df'] = found
         return update.message.reply_text(
             "Возможно, вы искали другое ТП, выберите из списка ниже:",
-            reply_markup=ReplyKeyboardMarkup([[tp] for tp in unique_tp], resize_keyboard=True)
+            reply_markup=kb
         )
 
-    # если ничего не нашлось
+    # ничего не нашлось
     if found.empty:
         return update.message.reply_text(
             "Договоров ВОЛС на данной ТП нет, либо название ТП введено некорректно.",
             reply_markup=kb_search_select()
         )
 
-    # точное или однозначное совпадение
+    # вывод результата
     tp_name = unique_tp[0]
     lines = [f"На {tp_name} {len(found)} ВОЛС с договором аренды.", ""]
     for _, r0 in found.iterrows():
         lines.append(f"ВЛ {r0['Уровень напряжения']} {r0['Наименование ВЛ']}:")
         lines.append(f"Опоры: {r0['Опоры']}")
         lines.append(f"Кол-во опор: {r0['Количество опор']}")
-        lines.append(f"Провайдер: {r0['Наименование Провайдера']}, {r0['Номер договора']}")
-        lines.append("")  # разделитель
+        prov = r0.get('Наименование Провайдера', '')
+        num  = r0.get('Номер договора', '')
+        tail = f", {num}" if num else ""
+        lines.append(f"Провайдер: {prov}{tail}")
+        lines.append("")
     resp = "\n".join(lines).strip()
 
     update.message.reply_text(resp, reply_markup=kb_search_select())
